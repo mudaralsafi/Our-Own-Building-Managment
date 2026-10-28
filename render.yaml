@@ -1,0 +1,27 @@
+# Optional deployment blueprint. Creating this file does not publish the site.
+# Review the hosting provider's current charges before creating a service.
+services:
+  - type: web
+    name: our-building
+    runtime: node
+    branch: main
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: building-records
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_PATH
+        value: /var/data/building.sqlite
+      - key: SETUP_TOKEN
+        generateValue: true

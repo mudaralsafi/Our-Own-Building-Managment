@@ -1,175 +1,407 @@
-import { chromium } from 'playwright-core';
-import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
-
-const directory = mkdtempSync(join(tmpdir(), 'our-building-browser-'));
-const port = 3317;
-const url = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, ['server/index.mjs'], { env: { ...process.env, PORT: String(port), DATA_PATH: join(directory, 'test.sqlite') }, stdio: ['ignore', 'pipe', 'pipe'] });
+import { chromium } from "playwright-core";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { once } from "node:events";
+import { randomBytes } from "node:crypto";
+const directory = mkdtempSync(join(tmpdir(), "building-browser-v2-")),
+  url = "http://127.0.0.1:3317";
+const server = spawn(process.execPath, ["server/index.mjs"], {
+  env: {
+    ...process.env,
+    NODE_ENV: "development",
+    HOST: "127.0.0.1",
+    PORT: "3317",
+    DATA_PATH: join(directory, "building.sqlite"),
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+});
 let browser;
 const errors = [];
-const ownerPassword = randomBytes(24).toString('hex');
-server.stderr.on('data', chunk => process.stderr.write(chunk));
+const password = randomBytes(24).toString("hex");
+server.stderr.on("data", (d) => process.stderr.write(d));
 try {
   await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Test server did not start')), 10000);
-    server.once('error', reject);
-    server.stdout.on('data', chunk => { if (chunk.toString().includes('running')) { clearTimeout(timeout); resolve(); } });
-    server.once('exit', code => reject(new Error(`Test server exited with ${code}`)));
+    const timer = setTimeout(
+      () => reject(new Error("Server startup timed out")),
+      10000,
+    );
+    server.stdout.on("data", (d) => {
+      if (d.toString().includes("running")) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    server.once("exit", () => {
+      clearTimeout(timer);
+      reject(new Error("Test server exited"));
+    });
   });
-  browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1080 } });
-  page.on('pageerror', error => errors.push(error.message));
-  const log = label => console.log(`PASS ${label}`);
-  const clickNav = name => page.getByRole('navigation').getByRole('button', { name, exact: true }).click();
-  const dialog = () => page.getByRole('dialog');
-  const save = async name => { await dialog().getByRole('button', { name, exact: true }).click(); await dialog().waitFor({ state: 'hidden' }); };
-  const readState = async () => (await page.request.get(url + '/api/state')).json();
-  assert.equal((await fetch(url + '/api/state')).status, 401);
+  browser = await chromium.launch({
+    executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const page = await browser.newPage({
+    viewport: { width: 1440, height: 1080 },
+    reducedMotion: "reduce",
+  });
+  page.on("pageerror", (e) => errors.push(e.message));
+  const nav = async (name) => {
+    if (
+      await page
+        .getByRole("button", { name: "Open navigation", exact: true })
+        .isVisible()
+    )
+      await page
+        .getByRole("button", { name: "Open navigation", exact: true })
+        .click();
+    await page
+      .getByRole("navigation")
+      .getByRole("button", { name, exact: true })
+      .click();
+  };
+  const dialog = () => page.getByRole("dialog");
+  const save = async (name) => {
+    await dialog().getByRole("button", { name, exact: true }).click();
+    await dialog().waitFor({ state: "hidden" });
+  };
+  const state = async () =>
+    await (await page.request.get(url + "/api/state")).json();
+  const log = (s) => console.log("PASS " + s);
+  mkdirSync("test-results", { recursive: true });
+  assert.equal((await fetch(url + "/api/state")).status, 401);
   await page.goto(url);
-  await page.getByRole('heading', { name: 'Make yourself at home.' }).waitFor();
-  mkdirSync('test-results', { recursive: true });
-  await page.screenshot({ path: 'test-results/owner-setup.png', fullPage: true });
-  await page.getByLabel('Email address', { exact: true }).fill('owner@example.test');
-  await page.getByLabel('Password', { exact: true }).fill(ownerPassword);
-  await page.getByLabel('Confirm password', { exact: true }).fill(ownerPassword);
-  await page.getByRole('button', { name: 'Create owner account', exact: true }).click();
-  await page.getByRole('heading', { name: 'A little clarity. A lot of possibility.' }).waitFor();
-  log('Anonymous records are protected; first-owner registration signs in');
-  await page.getByRole('heading', { name: 'Three steps to your first rental' }).waitFor();
-  mkdirSync('test-results', { recursive: true });
-  await page.screenshot({ path: 'test-results/overview-empty.png', fullPage: true });
-  log('Fresh workspace has honest empty states and no demo records');
-
-  await clickNav('Spaces');
-  await page.getByRole('button', { name: 'Add space', exact: true }).click();
-  await dialog().getByLabel('Space name', { exact: true }).fill('Shop G01');
-  await dialog().getByLabel('Floor / level', { exact: true }).fill('Ground floor');
-  await dialog().getByLabel('Area (m²)', { exact: true }).fill('85.5');
-  await save('Save space');
-  await page.getByRole('heading', { name: 'Shop G01', exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Add space', exact: true }).click();
-  await dialog().getByLabel('Space name', { exact: true }).fill('Rooftop terrace');
-  await dialog().getByLabel('Space type', { exact: true }).selectOption('Rooftop');
-  await dialog().getByLabel('Floor / level', { exact: true }).fill('Roof');
-  await dialog().getByLabel('Area (m²)', { exact: true }).fill('240');
-  await save('Save space');
-  log('Shop and rooftop spaces can be created');
-
-  await clickNav('Renters');
-  await page.getByRole('button', { name: 'Add renter', exact: true }).click();
-  await dialog().getByLabel('Full name', { exact: true }).fill('Sam Rivera');
-  await dialog().getByLabel('Business / company (optional)', { exact: true }).fill('Rivera Coffee');
-  await dialog().getByLabel('Email (optional)', { exact: true }).fill('sam@example.test');
-  await save('Save renter');
-  log('Renter contact details are saved');
-
-  const initial = await readState();
-  const today = initial.today;
-  const end = `${Number(today.slice(0, 4)) + 1}${today.slice(4)}`;
-  await clickNav('Leases');
-  await page.getByRole('button', { name: 'New lease', exact: true }).click();
-  await dialog().getByLabel('Space', { exact: true }).selectOption(initial.spaces.find(s => s.name === 'Shop G01').id);
-  await dialog().getByLabel('Renter', { exact: true }).selectOption(initial.renters[0].id);
-  await dialog().getByLabel('Lease start date', { exact: true }).fill(today);
-  await dialog().getByLabel('Lease end date (inclusive)', { exact: true }).fill(end);
-  await dialog().getByLabel('Monthly rent (USD)', { exact: true }).fill('1200.55');
-  await dialog().getByLabel('First rent due date', { exact: true }).fill(today);
-  await dialog().getByLabel('Security deposit (USD)', { exact: true }).fill('500');
-  await save('Save lease');
-  await page.getByRole('button', { name: 'View lease', exact: true }).click();
-  await dialog().getByRole('heading', { name: 'Shop G01' }).waitFor();
-  await dialog().getByRole('button', { name: 'Close dialog' }).click();
-  log('Lease creates a monthly rent schedule and separate deposit');
-
-  await clickNav('Rent & payments');
-  await page.getByRole('button', { name: 'Record payment', exact: true }).click();
-  const before = await readState();
-  const charge = before.charges.find(c => c.kind === 'rent');
-  await dialog().getByLabel('Payment for', { exact: true }).selectOption(charge.id);
-  await dialog().getByLabel('Amount received (USD)', { exact: true }).fill('400.20');
-  await dialog().getByLabel('Payment method', { exact: true }).selectOption('Bank transfer');
-  await dialog().getByLabel('Reference (optional)', { exact: true }).fill('TEST-001');
-  await save('Record payment');
-  const after = await readState();
-  assert.equal(after.charges.find(c => c.id === charge.id).balance, 80035);
-  assert.equal(after.payments.length, 1);
+  await page
+    .getByLabel("Email address", { exact: true })
+    .fill("owner@example.test");
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByLabel("Confirm password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Create owner account" }).click();
+  await page
+    .getByRole("heading", { name: "Your building, at a glance." })
+    .waitFor();
+  await page.screenshot({
+    path: "test-results/rebuilt-empty.png",
+    fullPage: true,
+  });
+  log("Private owner setup; truthful empty workspace");
+  await nav("Spaces");
+  for (const [name, type, floor, area] of [
+    ["G01", "Shop", "Ground floor", "85"],
+    ["G02", "Shop", "Ground floor", "90"],
+    ["O101", "Office", "First floor", "120"],
+    ["R01", "Rooftop", "Roof", "240"],
+  ]) {
+    await page
+      .getByRole("button", { name: "Add space", exact: true })
+      .first()
+      .click();
+    await dialog().getByLabel("Space number", { exact: true }).fill(name);
+    await dialog().getByLabel("Type", { exact: true }).selectOption(type);
+    await dialog().getByLabel("Floor / level", { exact: true }).fill(floor);
+    await dialog().getByLabel("Area (m²)", { exact: true }).fill(area);
+    await save("Save space");
+  }
+  await nav("Calls & interest");
+  for (const [name, business, spaceLabels, note] of [
+    [
+      "Sam Rivera",
+      "Rivera Coffee",
+      ["G01", "G02"],
+      "Interested in joining both shops for a café. Discussed a five-year agreement.",
+    ],
+    [
+      "Maya Chen",
+      "Green Pharmacy",
+      ["G01"],
+      "Asked about ground-floor visibility and parking. Call back after discussing the annual rent.",
+    ],
+    [
+      "Alex Morgan",
+      "Studio North",
+      ["O101"],
+      "Office for a small design team. Interested in a three-year agreement.",
+    ],
+  ]) {
+    await page
+      .getByRole("button", { name: "Log a call", exact: true })
+      .first()
+      .click();
+    await dialog().getByLabel("Name", { exact: true }).fill(name);
+    await dialog().getByLabel("Phone", { exact: true }).fill("+1 555 0100");
+    await dialog()
+      .getByLabel("Business / activity", { exact: true })
+      .fill(business);
+    for (const label of spaceLabels)
+      await dialog()
+        .getByRole("checkbox", { name: new RegExp("^" + label + " ") })
+        .check();
+    await dialog().getByLabel("Call notes", { exact: true }).fill(note);
+    await save("Log call");
+  }
+  assert.equal((await state()).enquiries.length, 3);
+  assert.equal((await state()).agreements.length, 0);
+  await page.screenshot({
+    path: "test-results/rebuilt-calls.png",
+    fullPage: true,
+  });
+  log("Fast call capture; multiple callers interested in the same space");
+  await page
+    .locator("article")
+    .filter({
+      has: page.getByRole("heading", { name: "Sam Rivera", exact: true }),
+    })
+    .getByRole("button", { name: "Prepare agreement" })
+    .click();
+  await dialog()
+    .getByLabel("Contract length (years)", { exact: true })
+    .fill("5");
+  await dialog()
+    .getByLabel("First annual rent (USD)", { exact: true })
+    .fill("12000");
+  await dialog()
+    .getByRole("button", { name: "Add change", exact: true })
+    .click();
+  await dialog().getByLabel("Change 1: from year", { exact: true }).fill("3");
+  await dialog().getByLabel("Change 1: value", { exact: true }).fill("5");
+  await dialog().getByLabel("Repeat yearly", { exact: true }).check();
+  await dialog()
+    .getByRole("button", { name: "Add change", exact: true })
+    .click();
+  await dialog().getByLabel("Change 2: from year", { exact: true }).fill("5");
+  await dialog()
+    .getByLabel("Change 2: method", { exact: true })
+    .selectOption("set");
+  await dialog().getByLabel("Change 2: value", { exact: true }).fill("20000");
+  await dialog().getByText("$13,230", { exact: true }).waitFor();
+  await page.screenshot({
+    path: "test-results/rebuilt-rent-preview.png",
+    fullPage: true,
+  });
+  await save("Save agreement");
+  await page
+    .getByRole("heading", { name: "Sam Rivera", exact: true })
+    .waitFor();
+  let s = await state(),
+    a = s.agreements[0];
+  assert.deepEqual(
+    a.rents.map((r) => r.amount),
+    [1200000, 1200000, 1260000, 1323000, 2000000],
+  );
+  assert.equal(a.space_ids.length, 2);
+  assert.equal(a.status, "awaiting-payment");
+  log(
+    "Combined-space agreement and mixed annual rent changes preview accurately",
+  );
+  async function pay(amount) {
+    await page
+      .getByRole("button", { name: "Record payment", exact: true })
+      .click();
+    await dialog()
+      .getByLabel("Amount received (USD)", { exact: true })
+      .fill(amount);
+    await dialog()
+      .getByLabel("Payment method", { exact: true })
+      .selectOption("Bank transfer");
+    await dialog()
+      .getByLabel("Reference (optional)", { exact: true })
+      .fill("SAMPLE-TRANSFER");
+    await save("Record payment");
+  }
+  await pay("2000");
+  assert.equal((await state()).agreements[0].secured, false);
+  await pay("4000");
+  assert.equal((await state()).agreements[0].secured, true);
+  assert.equal((await state()).agreements[0].effective_start, "");
   await page.reload();
-  await clickNav('Rent & payments');
-  await page.getByRole('button', { name: 'Payment history', exact: true }).click();
-  await page.getByText('TEST-001', { exact: true }).waitFor();
-  log('Partial payment survives reload and leaves the correct balance');
-
-  const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export', exact: true }).click();
-  const downloaded = await downloadPromise;
-  assert.match(downloaded.suggestedFilename(), /^rent-ledger-.*\.csv$/);
-  await downloaded.saveAs(resolve('test-results/ledger.csv'));
-  log('CSV export downloads');
-  await clickNav('Spaces');
-  assert.equal(new URL(page.url()).pathname, '/spaces');
-  await clickNav('Leases');
-  await page.goBack();
-  await page.getByRole('heading', { name: 'Every space, accounted for.' }).waitFor();
-  await page.reload();
-  await page.getByRole('heading', { name: 'Every space, accounted for.' }).waitFor();
-  log('Page URLs, browser history, and direct refresh work');
-  await clickNav('Overview');
-  await page.getByText('$400.20', { exact: true }).first().waitFor();
-  await page.screenshot({ path: 'test-results/overview-populated.png', fullPage: true });
-
+  await page
+    .getByRole("heading", { name: "Sam Rivera", exact: true })
+    .waitFor();
+  assert.ok(page.url().includes("?id="));
+  log(
+    "Partial payments secure both spaces at the threshold and survive reload",
+  );
+  const pdf = Buffer.from("%PDF-1.4\nSample signed agreement copy\n%%EOF");
+  await page
+    .getByLabel("Upload agreement document", { exact: true })
+    .setInputFiles({
+      name: "Signed agreement.pdf",
+      mimeType: "application/pdf",
+      buffer: pdf,
+    });
+  await page.getByRole("link", { name: /Signed agreement.pdf/ }).waitFor();
+  const document = (await state()).documents[0];
+  assert.equal(
+    (await fetch(url + "/api/documents/" + document.id)).status,
+    401,
+  );
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: /Signed agreement.pdf/ }).click();
+  assert.equal(
+    (await downloadEvent).suggestedFilename(),
+    "Signed agreement.pdf",
+  );
+  log("Private signed-copy upload and authenticated download");
+  await page.screenshot({
+    path: "test-results/rebuilt-agreement.png",
+    fullPage: true,
+  });
+  await nav("Overview");
+  await page.screenshot({
+    path: "test-results/rebuilt-overview.png",
+    fullPage: true,
+  });
+  await nav("Spaces");
+  await page.screenshot({
+    path: "test-results/rebuilt-spaces.png",
+    fullPage: true,
+  });
+  await nav("Overview");
+  await page
+    .getByRole("button", { name: "Confirm completion", exact: true })
+    .click();
+  await save("Confirm completion");
+  s = await state();
+  a = s.agreements[0];
+  assert.equal(a.status, "active");
+  assert.equal(a.effective_start, s.today);
+  assert.equal(
+    s.charges.find((c) => c.kind === "completion").due_date,
+    s.today,
+  );
+  log("Owner-confirmed completion activates leases and dates annual payments");
+  await nav("Agreements");
+  await page
+    .getByRole("button", { name: "View agreement", exact: true })
+    .click();
+  await pay("1000");
+  s = await state();
+  assert.equal(s.charges.find((c) => c.kind === "completion").balance, 500000);
+  await nav("Payments");
+  await page
+    .getByRole("button", { name: "All scheduled", exact: true })
+    .click();
+  const exportEvent = page.waitForEvent("download");
+  await page
+    .getByRole("button", { name: "Export ledger", exact: true })
+    .click();
+  assert.match((await exportEvent).suggestedFilename(), /annual-rent-ledger/);
+  await page.screenshot({
+    path: "test-results/rebuilt-payments.png",
+    fullPage: true,
+  });
+  log(
+    "Completion installment accepts partial payment; annual CSV export works",
+  );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: 'test-results/overview-mobile.png', fullPage: true, animations: 'disabled' });
-  if (!await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)) console.log(await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth, overflowing: [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > innerWidth + 1).map(e => ({ tag: e.tagName, class: e.className, right: e.getBoundingClientRect().right })) })));
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'Mobile overview must not overflow horizontally');
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await clickNav('Spaces');
-  await page.getByRole('heading', { name: 'Rooftop terrace', exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Edit Rooftop terrace', exact: true }).click();
-  await dialog().getByLabel('Handover readiness', { exact: true }).selectOption('true');
-  await save('Save space');
-  await page.getByText('Ready for handover', { exact: true }).waitFor();
-  log('Mobile navigation, responsive layout, and editing work');
-  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
-  await page.getByRole('heading', { name: 'Sign in to your building.' }).waitFor();
-  assert.equal((await page.request.get(url + '/api/state')).status(), 401);
-  await page.screenshot({ path: 'test-results/sign-in-mobile.png', fullPage: true });
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-  await page.goto(url + '/spaces');
-  await page.getByLabel('Email address', { exact: true }).fill('owner@example.test');
-  await page.getByLabel('Password', { exact: true }).fill(ownerPassword);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('heading', { name: 'Every space, accounted for.' }).waitFor();
-  log('Sign-out revokes access; sign-in restores the requested page');
-  await page.setViewportSize({ width: 1440, height: 1080 });
-  await page.getByRole('button', { name: 'Building settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Change password', exact: true }).click();
-  const changedPassword = randomBytes(24).toString('hex');
-  await page.getByLabel('Current password', { exact: true }).fill(ownerPassword);
-  await page.getByLabel('New password', { exact: true }).fill(changedPassword);
-  await page.getByLabel('Confirm new password', { exact: true }).fill(changedPassword);
-  await page.getByRole('button', { name: 'Change password', exact: true }).click();
-  await page.getByText('Password changed. Your other sessions have been signed out.', { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
-  await page.getByRole('heading', { name: 'Sign in to your building.' }).waitFor();
-  await page.screenshot({ path: 'test-results/sign-in-desktop.png', fullPage: true });
-  await page.getByLabel('Email address', { exact: true }).fill('owner@example.test');
-  await page.getByLabel('Password', { exact: true }).fill(ownerPassword);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('alert').filter({ hasText: 'The email or password is incorrect.' }).waitFor();
-  await page.getByLabel('Password', { exact: true }).fill(changedPassword);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await page.getByRole('heading', { name: 'A little clarity. A lot of possibility.' }).waitFor();
-  log('Password change works in the browser and invalidates the old password');
-  assert.deepEqual(errors, [], 'Browser should have no uncaught errors');
-  log('No browser runtime errors');
+  await nav("Overview");
+  await page.screenshot({
+    path: "test-results/rebuilt-mobile.png",
+    fullPage: true,
+  });
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+    "Mobile overview fits",
+  );
+  await nav("Calls & interest");
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+    "Mobile enquiries fit",
+  );
+  await page
+    .getByRole("button", { name: "Log a call", exact: true })
+    .first()
+    .click();
+  assert.equal(
+    await page.evaluate(
+      () =>
+        document.querySelector("[role=dialog]").scrollWidth <=
+        document.querySelector("[role=dialog]").clientWidth,
+    ),
+    true,
+    "Mobile form fits",
+  );
+  await dialog()
+    .getByRole("button", { name: "Close dialog", exact: true })
+    .click();
+  await nav("Agreements");
+  await page
+    .getByRole("button", { name: "View agreement", exact: true })
+    .click();
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+    "Mobile agreement fits",
+  );
+  log(
+    "Phone navigation, call form, dashboard, and agreement fit without page overflow",
+  );
+  await page
+    .getByRole("button", { name: "Cancel agreement", exact: true })
+    .click();
+  await dialog()
+    .getByLabel("Agreed amount to keep (USD)", { exact: true })
+    .fill("1000");
+  await dialog()
+    .getByLabel("Reason / settlement notes", { exact: true })
+    .fill("Settlement agreed with tenant");
+  await save("Cancel agreement");
+  assert.equal((await state()).agreements[0].refund_due, 600000);
+  await page
+    .getByRole("button", { name: "Record refund", exact: true })
+    .click();
+  await dialog()
+    .getByLabel("Amount refunded (USD)", { exact: true })
+    .fill("2000");
+  await save("Record refund");
+  assert.equal((await state()).agreements[0].refund_due, 400000);
+  assert.equal(
+    (await state()).payments.filter((p) => p.kind === "receipt").length,
+    3,
+  );
+  log("Case-by-case cancellation retains receipts and tracks partial refunds");
+  await page
+    .getByRole("button", { name: "Open navigation", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Sign in to your building." })
+    .waitFor();
+  assert.equal((await page.request.get(url + "/api/state")).status(), 401);
+  await page.goto(url + "/calls");
+  await page
+    .getByLabel("Email address", { exact: true })
+    .fill("owner@example.test");
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Every conversation, remembered." })
+    .waitFor();
+  await page.reload();
+  await page
+    .getByRole("heading", { name: "Every conversation, remembered." })
+    .waitFor();
+  assert.deepEqual(errors, []);
+  log(
+    "Session protection, direct routes, reload, and no browser runtime errors",
+  );
 } finally {
   await browser?.close();
-  const exited = once(server, 'exit'); server.kill('SIGTERM'); await exited;
+  if (server.exitCode === null) {
+    const exited = once(server, "exit");
+    server.kill("SIGTERM");
+    await exited;
+  }
   rmSync(directory, { recursive: true, force: true });
 }

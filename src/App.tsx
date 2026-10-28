@@ -1,207 +1,1799 @@
-import { cloneElement, useEffect, useId, useRef, useState, type FormEvent, type ReactElement, type ReactNode } from 'react';
-import { ArrowDownLeft, ArrowDownToLine, ArrowRight, ArrowUpRight, Building2, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, CreditCard, FileText, HardHat, LayoutDashboard, Leaf, MapPin, Menu, Pencil, Plus, Search, Settings2, ShieldCheck, Store, Sun, Trash2, Users, Wallet, X } from 'lucide-react';
-import type { Charge, Lease, Modal, Page, Space, State } from './types';
-import { request } from './api';
-import { AccountSecurity } from './Auth';
-import { LogOut } from 'lucide-react';
-
-const pagePaths: Record<Page, string> = { Overview: '/overview', Spaces: '/spaces', Renters: '/renters', Leases: '/leases', 'Rent & payments': '/payments', Settings: '/settings' };
-const pageFromUrl = () => (Object.entries(pagePaths).find(([, path]) => path === window.location.pathname)?.[0] || 'Overview') as Page;
-
-const money = (cents: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: cents % 100 ? 2 : 0 }).format(cents / 100);
-const dateLabel = (value: string, year = false) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', ...(year ? { year: 'numeric' } : {}), timeZone: 'UTC' }).format(new Date(value + 'T12:00:00Z'));
-const monthLabel = (value: string) => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(value + 'T12:00:00Z'));
-const nextYear = (value: string) => { const d = new Date(value + 'T12:00:00Z'); d.setUTCFullYear(d.getUTCFullYear() + 1); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); };
-const initials = (name: string) => name.split(' ').filter(Boolean).slice(0, 2).map(s => s[0]).join('').toUpperCase();
-const navItems: { label: Page; icon: typeof Building2 }[] = [
-  { label: 'Overview', icon: LayoutDashboard }, { label: 'Spaces', icon: Building2 },
-  { label: 'Renters', icon: Users }, { label: 'Leases', icon: FileText },
-  { label: 'Rent & payments', icon: Wallet },
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  ArrowDownToLine,
+  ArrowRight,
+  Building2,
+  CalendarDays,
+  CheckCircle2,
+  ChevronLeft,
+  FileText,
+  HardHat,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  MoreHorizontal,
+  Phone,
+  Plus,
+  Search,
+  Settings2,
+  Upload,
+  Users,
+  Wallet,
+  X,
+  Pencil,
+  Trash2,
+  ArrowUpRight,
+} from "lucide-react";
+import type { Agreement, Charge, Page, State } from "./types";
+import { request } from "./api";
+import { AccountSecurity } from "./Auth";
+import {
+  Badge,
+  Button,
+  Empty,
+  Field,
+  Modal,
+  dateLabel,
+  download,
+  money,
+} from "./ui";
+import { RecordForm, formTitles, type FormKind } from "./forms";
+const paths: Record<Page, string> = {
+  Overview: "/overview",
+  "Calls & interest": "/calls",
+  Spaces: "/spaces",
+  Agreements: "/agreements",
+  Payments: "/payments",
+  Settings: "/settings",
+};
+const pageFromUrl = () =>
+  (Object.entries(paths).find(([, p]) => p === location.pathname)?.[0] ||
+    { "/renters": "Calls & interest", "/leases": "Agreements" }[
+      location.pathname
+    ] ||
+    "Overview") as Page;
+const nav = [
+  { name: "Overview" as Page, icon: LayoutDashboard },
+  { name: "Calls & interest" as Page, icon: Phone },
+  { name: "Spaces" as Page, icon: Building2 },
+  { name: "Agreements" as Page, icon: FileText },
+  { name: "Payments" as Page, icon: Wallet },
 ];
-function Button({ children, onClick, variant = 'primary', type = 'button', disabled = false, className = '' }: { children: ReactNode; onClick?: () => void; variant?: string; type?: 'submit' | 'button'; disabled?: boolean; className?: string }) {
-  return <button type={type} className={`button ${variant} ${className}`} onClick={onClick} disabled={disabled}>{children}</button>;
+const chargeLabel = (c: Charge) =>
+  c.kind === "initial"
+    ? "First half"
+    : c.kind === "completion"
+      ? "Remaining half"
+      : `Year ${c.year} rent`;
+function csv(value: unknown) {
+  let s = String(value ?? "");
+  if (/^[=+@\-\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replaceAll('"', '""') + '"';
 }
-function Badge({ status, children }: { status: string; children?: ReactNode }) { return <span className={`badge ${status.toLowerCase().replaceAll(' ', '-')}`}><i />{children || status[0].toUpperCase() + status.slice(1)}</span>; }
-function Empty({ icon: Icon, title, description, action, onClick }: { icon: typeof Building2; title: string; description: string; action?: string; onClick?: () => void }) {
-  return <div className="empty-state"><div className="empty-icon"><Icon size={26} strokeWidth={1.5} /></div><h3>{title}</h3><p>{description}</p>{action && <Button onClick={onClick}><Plus size={16} />{action}</Button>}</div>;
-}
-function Field({ label, children, hint, wide = false }: { label: string; children: ReactNode; hint?: string; wide?: boolean }) {
-  const id = useId();
-  return <div className={`field ${wide ? 'wide' : ''}`}><label htmlFor={id}>{label}</label>{cloneElement(children as ReactElement<{ id: string; 'aria-describedby'?: string }>, { id, 'aria-describedby': hint ? id + '-hint' : undefined })}{hint && <small id={id + '-hint'}>{hint}</small>}</div>;
-}
-function ModalFrame({ title, subtitle, children, close, busy }: { title: string; subtitle: string; children: ReactNode; close: () => void; busy: boolean }) {
-  const ref = useRef<HTMLDivElement>(null);
+export default function App({
+  ownerEmail,
+  onSignOut,
+}: {
+  ownerEmail: string;
+  onSignOut: () => Promise<void>;
+}) {
+  const [state, setState] = useState<State | null>(null),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false),
+    [toast, setToast] = useState("");
+  const [page, setPage] = useState<Page>(pageFromUrl),
+    [selectedId, setSelectedId] = useState(
+      new URLSearchParams(location.search).get("id") || "",
+    );
+  const [form, setForm] = useState<FormKind | null>(null),
+    [search, setSearch] = useState(""),
+    [filter, setFilter] = useState("All"),
+    [tab, setTab] = useState("Due"),
+    [mobile, setMobile] = useState(false),
+    [contacts, setContacts] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const refresh = async () => {
+    const next = await request("state");
+    setState(next);
+  };
   useEffect(() => {
-    const previous = document.activeElement as HTMLElement;
-    document.body.style.overflow = 'hidden';
-    const timer = setTimeout(() => ref.current?.querySelector<HTMLElement>('input, select, button')?.focus(), 0);
-    return () => { clearTimeout(timer); document.body.style.overflow = ''; previous?.focus(); };
+    refresh().catch((e) => setError(e.message));
   }, []);
-  return <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget && !busy) close(); }}><div ref={ref} className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" onKeyDown={e => {
-    if (e.key === 'Escape' && !busy) close();
-    if (e.key === 'Tab') {
-      const items = [...(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]') || [])];
-      if (e.shiftKey && document.activeElement === items[0]) { e.preventDefault(); items.at(-1)?.focus(); }
-      else if (!e.shiftKey && document.activeElement === items.at(-1)) { e.preventDefault(); items[0]?.focus(); }
+  useEffect(() => {
+    const sync = () => {
+      setPage(pageFromUrl());
+      setSelectedId(new URLSearchParams(location.search).get("id") || "");
+      setSearch("");
+      setFilter("All");
+      setForm(null);
+      setMobile(false);
+    };
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  useEffect(() => {
+    document.title = `${page} · Our Building`;
+  }, [page]);
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(""), 5000);
+      return () => clearTimeout(timer);
     }
-  }}><div className="modal-header"><div><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={close} disabled={busy}><X size={20} /></button></div>{children}</div></div>;
-}
-function BuildingDrawing() {
-  return <div className="building-drawing" aria-hidden="true"><div className="drawing-sun" /><div className="drawing-grid" /><div className="building-side" /><div className="building-front"><div className="building-roof"><span /><span /><span /></div>{[0, 1, 2].map(row => <div className="window-row" key={row}>{[0, 1, 2, 3, 4].map(col => <i key={col} />)}</div>)}<div className="storefront"><i /><i /><i /></div></div><div className="drawing-tree one" /><div className="drawing-tree two" /><div className="ground-line" /></div>;
-}
-function download(filename: string, body: string, type: string) {
-  const url = URL.createObjectURL(new Blob([body], { type }));
-  const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-function csvCell(value: unknown) {
-  let text = String(value ?? '');
-  if (/^[=+@\-\t\r]/.test(text)) text = "'" + text;
-  return '"' + text.replaceAll('"', '""') + '"';
-}
-
-export default function App({ ownerEmail, onSignOut }: { ownerEmail: string; onSignOut: () => Promise<void> }) {
-  const [state, setState] = useState<State | null>(null);
-  const [loadError, setLoadError] = useState('');
-  const [page, setPage] = useState<Page>(pageFromUrl);
-  const [modal, setModal] = useState<Modal | null>(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState('');
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('All');
-  const [ledgerTab, setLedgerTab] = useState<'schedule' | 'payments'>('schedule');
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [selectedCharge, setSelectedCharge] = useState('');
-  const [settingsMessage, setSettingsMessage] = useState('');
-  const [signingOut, setSigningOut] = useState(false);
+  }, [toast]);
   useEffect(() => {
-    const change = () => { setPage(pageFromUrl()); setSearch(''); setFilter('All'); setModal(null); setMobileOpen(false); };
-    window.addEventListener('popstate', change);
-    if (['/', '/login'].includes(window.location.pathname)) window.history.replaceState({}, '', '/overview');
-    return () => window.removeEventListener('popstate', change);
+    const visible = () => {
+      if (document.visibilityState === "visible") refresh().catch(() => {});
+    };
+    const timer = setInterval(visible, 60000);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
+    };
   }, []);
-  useEffect(() => { document.title = `${page} · Our Building`; }, [page]);
-  const refresh = async () => { const data = await request('state'); setState(data); setLoadError(''); };
-  useEffect(() => { refresh().catch(e => setLoadError(e.message)); }, []);
-  useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 5000); return () => clearTimeout(timer); } }, [toast]);
-  useEffect(() => {
-    const update = () => { if (document.visibilityState === 'visible') refresh().catch(() => {}); };
-    document.addEventListener('visibilitychange', update);
-    const timer = setInterval(update, 60000);
-    return () => { document.removeEventListener('visibilitychange', update); clearInterval(timer); };
-  }, []);
-  const go = (target: Page) => { if (window.location.pathname !== pagePaths[target]) window.history.pushState({}, '', pagePaths[target]); setPage(target); setSearch(''); setFilter('All'); setMobileOpen(false); setMenuOpen(false); setError(''); };
-  const open = (next: Modal) => { setError(''); setModal(next); setMenuOpen(false); if (next.kind === 'payment') setSelectedCharge(next.charge?.id || ''); };
-  const paymentModal = (charge?: Charge) => open({ kind: 'payment', charge, paymentId: crypto.randomUUID() });
-  const mutate = async (path: string, method: string, data: unknown, success: string) => {
-    setBusy(true); setError('');
-    try { await request(path, method, data); await refresh(); setModal(null); setToast(success); }
-    catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
+  const go = (next: Page, id = "") => {
+    history.pushState(
+      {},
+      "",
+      paths[next] + (id ? "?id=" + encodeURIComponent(id) : ""),
+    );
+    setPage(next);
+    setSelectedId(id);
+    setSearch("");
+    setFilter("All");
+    setForm(null);
+    setError("");
+    setMobile(false);
+    window.scrollTo(0, 0);
   };
-  if (!state) return <div className="loading-screen"><Building2 size={32} /><h1>Our Building</h1>{loadError ? <><p role="alert">{loadError}</p><Button onClick={() => refresh().catch(e => setLoadError(e.message))}>Try again</Button></> : <p>Getting your workspace ready…</p>}</div>;
-
-  const { today, settings, spaces, renters, leases, charges, payments } = state;
-  const month = today.slice(0, 7);
-  const monthRent = charges.filter(c => c.kind === 'rent' && c.due_date.startsWith(month));
-  const expected = monthRent.reduce((sum, c) => sum + c.amount, 0);
-  const collected = monthRent.reduce((sum, c) => sum + c.paid, 0);
-  const rentReceived = payments.filter(p => p.paid_date.startsWith(month) && charges.find(c => c.id === p.charge_id)?.kind === 'rent').reduce((sum, p) => sum + p.amount, 0);
-  const overdue = charges.filter(c => c.balance > 0 && c.due_date < today);
-  const outstanding = overdue.reduce((sum, c) => sum + c.balance, 0);
-  const occupied = spaces.filter(s => leases.some(l => l.space_id === s.id && l.status === 'active')).length;
-  const reserved = spaces.filter(s => !leases.some(l => l.space_id === s.id && l.status === 'active') && leases.some(l => l.space_id === s.id && l.status === 'reserved')).length;
-  const allocated = occupied + reserved;
-  const getSpace = (id: string) => spaces.find(s => s.id === id)!;
-  const getRenter = (id: string) => renters.find(r => r.id === id)!;
-  const getLease = (id: string) => leases.find(l => l.id === id)!;
-  const allocation = (space: Space) => leases.find(l => l.space_id === space.id && l.status === 'active') || leases.filter(l => l.space_id === space.id && l.status === 'reserved').sort((a, b) => a.start_date.localeCompare(b.start_date))[0];
-  const matches = (...values: string[]) => values.some(v => v.toLowerCase().includes(search.toLowerCase()));
-  const upcoming = charges.filter(c => c.balance && (c.due_date < today || c.due_date <= (() => { const d = new Date(today); d.setUTCDate(d.getUTCDate() + 30); return d.toISOString().slice(0, 10); })())).slice(0, 5);
-  const daysToCompletion = Math.ceil((Date.parse(settings.completion_date) - Date.parse(today)) / 86400000);
-  const completionText = daysToCompletion > 0 ? `${daysToCompletion} days to target opening` : daysToCompletion === 0 ? 'Target opening is today' : 'Target opening date reached';
-  const exportLedger = () => {
-    const rows = [['Space', 'Renter', 'Type', 'Due date', 'Amount USD', 'Paid USD', 'Balance USD', 'Status'], ...charges.map(c => { const l = getLease(c.lease_id); return [getSpace(l.space_id).name, getRenter(l.renter_id).name, c.kind, c.due_date, (c.amount / 100).toFixed(2), (c.paid / 100).toFixed(2), (c.balance / 100).toFixed(2), c.status]; })];
-    download(`rent-ledger-${today}.csv`, '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
-    setToast('Rent ledger downloaded');
+  const open = (spec: FormKind) => {
+    setError("");
+    setForm(spec);
   };
-  const titles: Record<Page, string> = { Overview: 'A little clarity. A lot of possibility.', Spaces: 'Every space, accounted for.', Renters: 'Good relationships start here.', Leases: 'Make room for what’s next.', 'Rent & payments': 'Keep your rent on track.', Settings: 'Make this building yours.' };
-  const subtitle: Record<Page, string> = { Overview: 'Your building, your renters, and your next steps — all in one place.', Spaces: 'Organize your shops, offices, and rooftop. Know what’s available.', Renters: 'Keep contact details and rental history together.', Leases: 'Reserve spaces now. Set rent to begin when you agree.', 'Rent & payments': 'See what’s due, record what’s received, and follow up with confidence.', Settings: 'A few details to keep your workspace running smoothly.' };
-
-  const renderChargeTable = (list: Charge[], compact = false) => <div className="table-scroll"><table><thead><tr><th>Renter / space</th><th>Due date</th>{!compact && <th>Charge</th>}<th>{compact ? 'Balance' : 'Amount / balance'}</th><th>Status</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{list.map(c => { const l = getLease(c.lease_id); const r = getRenter(l.renter_id); return <tr key={c.id}><td><div className="cell-person"><span className="avatar small">{initials(r.name)}</span><div><strong>{r.name}</strong><small>{getSpace(l.space_id).name}{compact && c.kind === 'deposit' ? ' · Deposit' : ''}</small></div></div></td><td><span className={c.status === 'overdue' ? 'text-danger' : ''}>{dateLabel(c.due_date, true)}</span></td>{!compact && <td><span className="capitalize">{c.kind}</span></td>}<td><strong className="number">{money(compact ? c.balance : c.amount)}</strong>{!compact && <small>{c.balance ? `${money(c.balance)} left` : 'Fully paid'}</small>}</td><td><Badge status={c.status} /></td><td>{c.balance > 0 ? <button className="text-button" onClick={() => paymentModal(c)}>Record <ArrowUpRight size={14} /></button> : <CheckCircle2 size={18} className="muted-green" aria-label="Paid" />}</td></tr>; })}</tbody></table></div>;
-
-  return <div className="app-shell">
-    {mobileOpen && <button className="sidebar-overlay" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
-    <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`}>
-      <button className="brand" onClick={() => go('Overview')}><span className="brand-mark"><Building2 size={23} strokeWidth={1.6} /></span><span>our building<span className="brand-dot">.</span></span></button>
-      <div className="property-switch"><span className="property-icon"><Building2 size={19} /></span><div><strong>{settings.name}</strong><small>Property workspace</small></div><ChevronDown size={14} /></div>
-      <p className="nav-label">WORKSPACE</p>
-      <nav aria-label="Main navigation">{navItems.map(({ label, icon: Icon }) => <button key={label} aria-label={label} className={`nav-item ${page === label ? 'active' : ''}`} aria-current={page === label ? 'page' : undefined} onClick={() => go(label)}><Icon size={19} strokeWidth={1.7} /><span>{label}</span>{label === 'Spaces' && spaces.length > 0 && <span className="nav-count">{spaces.length}</span>}{label === 'Rent & payments' && overdue.length > 0 && <span className="nav-count alert">{overdue.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="opening-note"><span className="opening-icon"><Leaf size={19} /></span><p>A new chapter is coming.</p><small>{completionText}</small><button onClick={() => go('Settings')}>Opening details <ArrowUpRight size={14} /></button></div><button className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Settings2 size={19} /><span>Building settings</span></button><div className="sidebar-footer"><span className="avatar owner">OB</span><div><strong>Building owner</strong><small>Your property workspace</small></div></div></div>
-    </aside>
-    <div className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="Open navigation"><Menu size={21} /></button><Building2 size={16} /><span>{settings.name}</span><ChevronRight size={14} /><strong>{page}</strong></div><div className="topbar-right"><span className="today"><CalendarDays size={15} />{dateLabel(today, true)}</span><span className="topbar-divider" /><span className="avatar top-avatar">OB</span><button className="signout-button" aria-label="Sign out" disabled={signingOut} onClick={async () => { setSigningOut(true); try { await onSignOut(); } catch (e) { setToast((e as Error).message); } finally { setSigningOut(false); } }}><LogOut size={15} /><span>{signingOut ? "Signing out…" : "Sign out"}</span></button></div></header>
-      <main>
-        <div className="page-heading"><div><div className="eyebrow">{page === 'Overview' ? 'THE BIG PICTURE' : page.toUpperCase()}</div><h1>{titles[page]}</h1><p>{subtitle[page]}</p></div><div className="heading-actions">{page === 'Overview' ? <div className="add-menu"><Button onClick={() => setMenuOpen(!menuOpen)}><Plus size={17} />Add new<ChevronDown size={14} /></Button>{menuOpen && <><button className="menu-dismiss" aria-label="Close add menu" onClick={() => setMenuOpen(false)} /><div className="dropdown"><button onClick={() => open({ kind: 'space' })}><Building2 size={17} />Space</button><button onClick={() => open({ kind: 'renter' })}><Users size={17} />Renter</button><button onClick={() => open({ kind: 'lease' })}><FileText size={17} />Lease</button><button onClick={() => paymentModal()}><Wallet size={17} />Payment</button></div></>}</div> : page === 'Spaces' ? <Button onClick={() => open({ kind: 'space' })}><Plus size={17} />Add space</Button> : page === 'Renters' ? <Button onClick={() => open({ kind: 'renter' })}><Plus size={17} />Add renter</Button> : page === 'Leases' ? <Button onClick={() => open({ kind: 'lease' })}><Plus size={17} />New lease</Button> : page === 'Rent & payments' ? <><Button variant="secondary" onClick={exportLedger}><ArrowDownToLine size={16} />Export</Button><Button onClick={() => paymentModal()}><Plus size={17} />Record payment</Button></> : null}</div></div>
-
-        {page === 'Overview' && <>
-          <section className="opening-banner"><div className="banner-content"><span className="banner-tag"><HardHat size={14} />{spaces.length && spaces.every(s => s.ready) ? 'SPACES READY FOR HANDOVER' : 'BUILDING YOUR NEXT CHAPTER'}</span><h2>Start with a space.<br />Grow into a community.</h2><p>Welcome your first renters before the doors open.<br className="desktop-br" /> We’ll help you keep every detail in place.</p><div className="banner-bottom"><span><CalendarDays size={16} />Target opening <strong>{dateLabel(settings.completion_date, true)}</strong></span><button onClick={() => go('Settings')} aria-label="Edit opening details"><ArrowUpRight size={20} /></button></div></div><BuildingDrawing /><div className="drawing-caption"><i />SHOPS · OFFICES · ROOFTOP</div></section>
-          <div className="section-heading compact"><h2>Your building at a glance</h2><span className="month-chip"><CalendarDays size={14} />{monthLabel(today)}</span></div>
-          <section className="stats-grid" aria-label="Building summary">
-            {[{ label: 'Rent due this month', value: money(expected), foot: `${monthRent.length} scheduled rent charges`, icon: CalendarDays, tone: 'sage' }, { label: 'Rent received', value: money(rentReceived), foot: 'Received this month · excludes deposits', icon: ArrowDownLeft, tone: 'green' }, { label: 'Overdue balance', value: money(outstanding), foot: overdue.length ? `${overdue.length} overdue charges · includes deposits` : 'No overdue rent or deposits', icon: Clock3, tone: 'amber' }, { label: 'Spaces allocated', value: `${allocated}`, suffix: `/ ${spaces.length}`, foot: `${occupied} occupied · ${reserved} reserved`, icon: Building2, tone: 'blue' }].map(stat => <article className="stat-card" key={stat.label}><div className="stat-top"><span>{stat.label}</span><span className={`stat-icon ${stat.tone}`}><stat.icon size={17} /></span></div><div className="stat-value">{stat.value}{stat.suffix && <span>{stat.suffix}</span>}</div><p>{stat.foot}</p></article>)}
-          </section>
-          {!leases.length && <section className="getting-started"><div className="section-heading"><div><span className="eyebrow">A STRONG FOUNDATION</span><h2>Three steps to your first rental</h2></div><span className="step-count">{Number(spaces.length > 0) + Number(renters.length > 0)} of 3 complete</span></div><div className="setup-steps">{[{ title: 'Map out your spaces', description: 'Add shops, offices, and rooftop areas.', done: spaces.length > 0, icon: Building2, action: () => open({ kind: 'space' }), button: 'Add a space' }, { title: 'Meet your renters', description: 'Keep names and contact details handy.', done: renters.length > 0, icon: Users, action: () => open({ kind: 'renter' }), button: 'Add a renter' }, { title: 'Create your first lease', description: 'Agree on dates, rent, and a deposit.', done: false, icon: FileText, action: () => open({ kind: 'lease' }), button: 'Create a lease' }].map((step, index) => <div className={`setup-step ${step.done ? 'complete' : ''}`} key={step.title}><span className="step-number">{step.done ? <Check size={17} /> : `0${index + 1}`}</span><h3>{step.title}</h3><p>{step.description}</p><button className="text-button" onClick={step.action}>{step.done ? 'Add another' : step.button}<ArrowRight size={15} /></button></div>)}</div></section>}
-          <div className="dashboard-bottom"><section className="panel due-panel"><div className="panel-heading"><div><h2>On the horizon</h2><p>Overdue and due in the next 30 days</p></div><button className="text-button" onClick={() => go('Rent & payments')}>View all <ArrowUpRight size={15} /></button></div>{upcoming.length ? renderChargeTable(upcoming, true) : <Empty icon={CalendarDays} title="A clear calendar, for now" description={leases.length ? 'No outstanding payments are due in the next 30 days.' : 'Once you add a lease, upcoming rent and deposits will appear here.'} />}</section><section className="panel collection-panel"><div className="panel-heading"><div><h2>Space overview</h2><p>Room for your next renter</p></div><Building2 size={18} /></div><div className="occupancy-ring" style={{ '--occupied': `${spaces.length ? occupied / spaces.length * 100 : 0}%`, '--allocated': `${spaces.length ? allocated / spaces.length * 100 : 0}%` } as React.CSSProperties}><div><strong>{spaces.length ? Math.round(allocated / spaces.length * 100) : 0}<span>%</span></strong><small>allocated</small></div></div><div className="occupancy-legend"><div><i className="dot green" />Occupied<strong>{occupied}</strong></div><div><i className="dot lime" />Reserved<strong>{reserved}</strong></div><div><i className="dot gray" />Unallocated<strong>{spaces.length - allocated}</strong></div></div><button className="panel-footer-link" onClick={() => go('Spaces')}>Explore your spaces <ArrowRight size={15} /></button></section></div>
-          {expected > 0 && <div className="collection-strip"><CheckCircle2 size={19} /><span><strong>{money(collected)}</strong> collected against the <strong>{money(expected)}</strong> rent scheduled for {monthLabel(today)}.</span><div className="progress-track"><i style={{ width: `${collected / expected * 100}%` }} /></div><strong>{Math.round(collected / expected * 100)}%</strong></div>}
-        </>}
-
-        {page === 'Spaces' && <>
-          <div className="summary-strip"><span><strong>{spaces.length}</strong> total spaces</span><span><strong>{spaces.reduce((sum, s) => sum + s.area, 0).toLocaleString('en-US')}</strong> m² total area</span><span><strong>{spaces.length - allocated}</strong> unallocated</span><span><strong>{spaces.filter(s => s.ready).length}</strong> ready for handover</span></div>
-          <div className="list-toolbar"><div className="filter-tabs" aria-label="Space type">{['All', 'Shop', 'Office', 'Rooftop'].map(item => <button aria-pressed={filter === item} className={filter === item ? 'selected' : ''} key={item} onClick={() => setFilter(item)}>{item === 'All' ? 'All spaces' : item === 'Rooftop' ? 'Rooftop' : item + 's'}</button>)}</div><label className="search-field"><Search size={17} /><input aria-label="Search spaces" placeholder="Search spaces…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
-          {!spaces.length ? <section className="panel"><Empty icon={Building2} title="Your building starts here" description="Add each rentable space, including its floor and area. You can reserve it while construction is still underway." action="Add your first space" onClick={() => open({ kind: 'space' })} /></section> : <div className="spaces-grid">{spaces.filter(s => (filter === 'All' || s.type === filter) && matches(s.name, s.floor)).map(s => { const lease = allocation(s); const Icon = s.type === 'Shop' ? Store : s.type === 'Rooftop' ? Sun : Building2; return <article className="space-card" key={s.id}><div className={`space-visual ${s.type.toLowerCase()}`}><div className="space-visual-lines" /><Icon size={48} strokeWidth={1} /><span className="space-type-label">{s.type}</span><button className="icon-button" onClick={() => open({ kind: 'space', record: s })} aria-label={`Edit ${s.name}`}><Pencil size={16} /></button></div><div className="space-card-body"><div className="space-title"><h3>{s.name}</h3><Badge status={lease?.status || 'available'} /></div><div className="space-meta"><span><MapPin size={14} />{s.floor}</span><span>{s.area.toLocaleString('en-US')} m²</span></div><div className="space-readiness"><i className={`dot ${s.ready ? 'green' : 'amber'}`} />{s.ready ? 'Ready for handover' : 'Under construction'}</div><div className="space-assignment">{lease ? <><div><small>{lease.status === 'reserved' ? `Reserved from ${dateLabel(lease.start_date, true)}` : 'Current renter'}</small><strong>{getRenter(lease.renter_id).name}</strong></div><button className="icon-button" onClick={() => open({ kind: 'details', record: lease })} aria-label={`View lease for ${s.name}`}><ArrowUpRight size={19} /></button></> : <><span>Ready for its next chapter</span><button className="text-button" onClick={() => open({ kind: 'lease', spaceId: s.id })}>Create lease <Plus size={15} /></button></>}</div></div></article>; })}{!spaces.some(s => (filter === 'All' || s.type === filter) && matches(s.name, s.floor)) && <div className="panel full-width"><Empty icon={Search} title="No matching spaces" description="Try a different name or space type." /></div>}</div>}
-        </>}
-
-        {page === 'Renters' && <>
-          <div className="list-toolbar"><div className="list-count"><strong>{renters.length}</strong> {renters.length === 1 ? 'renter' : 'renters'} in your building</div><label className="search-field"><Search size={17} /><input aria-label="Search renters" placeholder="Search renters…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
-          <section className="panel">{!renters.length ? <Empty icon={Users} title="Make room for good people" description="Add your first renter’s contact details. Assign a space and set up their rent when you create a lease." action="Add your first renter" onClick={() => open({ kind: 'renter' })} /> : renters.filter(r => matches(r.name, r.company, r.phone, r.email)).length ? <div className="table-scroll"><table><thead><tr><th>Renter</th><th>Contact</th><th>Allocated spaces</th><th>Overdue balance</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{renters.filter(r => matches(r.name, r.company, r.phone, r.email)).map(r => { const renterLeases = leases.filter(l => l.renter_id === r.id); const balance = overdue.filter(c => renterLeases.some(l => l.id === c.lease_id)).reduce((s, c) => s + c.balance, 0); return <tr key={r.id}><td><div className="cell-person"><span className="avatar">{initials(r.name)}</span><div><strong>{r.name}</strong><small>{r.company || 'Individual renter'}</small></div></div></td><td>{r.phone || r.email ? <>{r.phone && <a href={`tel:${r.phone}`}>{r.phone}</a>}{r.email && <small><a href={`mailto:${r.email}`}>{r.email}</a></small>}</> : <span className="muted">No contact details</span>}</td><td>{renterLeases.filter(l => l.status !== 'ended').length ? renterLeases.filter(l => l.status !== 'ended').map(l => <button key={l.id} className="space-chip" onClick={() => open({ kind: 'details', record: l })}>{getSpace(l.space_id).name}<ArrowUpRight size={12} /></button>) : <span className="muted">No current leases</span>}</td><td><strong className={balance ? 'text-danger number' : 'number'}>{money(balance)}</strong></td><td><button className="icon-button" aria-label={`Edit ${r.name}`} onClick={() => open({ kind: 'renter', record: r })}><Pencil size={16} /></button></td></tr>; })}</tbody></table></div> : <Empty icon={Search} title="No matching renters" description="Try a different name or contact detail." />}</section>
-        </>}
-
-        {page === 'Leases' && <>
-          <div className="list-toolbar"><div className="filter-tabs" aria-label="Lease status">{['All', 'Active', 'Reserved', 'Ended'].map(item => <button key={item} aria-pressed={filter === item} className={filter === item ? 'selected' : ''} onClick={() => setFilter(item)}>{item === 'All' ? 'All leases' : item}</button>)}</div><label className="search-field"><Search size={17} /><input aria-label="Search leases" placeholder="Search renter or space…" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
-          <section className="panel">{!leases.length ? <Empty icon={FileText} title="Your first agreement starts here" description="Link a renter to a space, set the rental period, and choose when their first payment is due. Future leases are marked as reserved." action="Create your first lease" onClick={() => open({ kind: 'lease' })} /> : leases.filter(l => (filter === 'All' || l.status === filter.toLowerCase()) && matches(getSpace(l.space_id).name, getRenter(l.renter_id).name)).length ? <div className="table-scroll"><table><thead><tr><th>Space / renter</th><th>Lease period</th><th>Monthly rent</th><th>Status</th><th><span className="sr-only">Details</span></th></tr></thead><tbody>{leases.filter(l => (filter === 'All' || l.status === filter.toLowerCase()) && matches(getSpace(l.space_id).name, getRenter(l.renter_id).name)).sort((a, b) => b.start_date.localeCompare(a.start_date)).map(l => <tr key={l.id}><td><strong>{getSpace(l.space_id).name}</strong><small>{getRenter(l.renter_id).name}</small></td><td>{dateLabel(l.start_date, true)}<small>to {dateLabel(l.end_date, true)}</small></td><td><strong className="number">{money(l.monthly_rent)}</strong><small>{l.deposit ? `${money(l.deposit)} deposit` : 'No deposit'}</small></td><td><Badge status={l.status} /></td><td><button className="text-button" onClick={() => open({ kind: 'details', record: l })}>View lease <ArrowUpRight size={14} /></button></td></tr>)}</tbody></table></div> : <Empty icon={Search} title="No matching leases" description="Try another status or search term." />}</section>
-          <div className="info-note"><ShieldCheck size={18} /><p>Spaces can have multiple leases over time. Overlapping dates are automatically blocked.</p></div>
-        </>}
-
-        {page === 'Rent & payments' && <>
-          <div className="summary-strip"><span><strong>{money(rentReceived)}</strong> rent received this month</span><span><strong className={outstanding ? 'text-danger' : ''}>{money(outstanding)}</strong> overdue incl. deposits</span><span><strong>{money(payments.filter(p => p.paid_date.startsWith(month) && charges.find(c => c.id === p.charge_id)?.kind === 'deposit').reduce((sum, p) => sum + p.amount, 0))}</strong> deposits received this month</span></div>
-          <div className="list-toolbar ledger-toolbar"><div className="filter-tabs"><button className={ledgerTab === 'schedule' ? 'selected' : ''} onClick={() => setLedgerTab('schedule')}>Payment schedule</button><button className={ledgerTab === 'payments' ? 'selected' : ''} onClick={() => setLedgerTab('payments')}>Payment history</button></div><div className="toolbar-right">{ledgerTab === 'schedule' && <select aria-label="Filter payments" value={filter} onChange={e => setFilter(e.target.value)}><option>All</option><option>This month</option><option>Overdue</option><option>Unpaid</option><option>Paid</option></select>}<label className="search-field"><Search size={17} /><input aria-label="Search payments" placeholder="Search renter or space…" value={search} onChange={e => setSearch(e.target.value)} /></label></div></div>
-          <section className="panel">{!charges.length ? <Empty icon={Wallet} title="Every payment, in its place" description="Create a lease to generate its monthly rent schedule. Record full or partial payments as you receive them." action="Create a lease" onClick={() => open({ kind: 'lease' })} /> : ledgerTab === 'schedule' ? (() => { const list = charges.filter(c => { const l = getLease(c.lease_id); return matches(getSpace(l.space_id).name, getRenter(l.renter_id).name) && (filter === 'All' || filter === 'This month' && c.due_date.startsWith(month) || filter === 'Overdue' && c.status === 'overdue' || filter === 'Unpaid' && c.balance > 0 || filter === 'Paid' && !c.balance); }); return list.length ? renderChargeTable(list) : <Empty icon={CheckCircle2} title="Nothing here right now" description="No charges match these filters." />; })() : (() => { const list = payments.filter(p => { const l = getLease(charges.find(c => c.id === p.charge_id)!.lease_id); return matches(getSpace(l.space_id).name, getRenter(l.renter_id).name, p.reference); }); return list.length ? <div className="table-scroll"><table><thead><tr><th>Renter / space</th><th>Received</th><th>Amount</th><th>Method / reference</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{list.map(p => { const c = charges.find(c => c.id === p.charge_id)!; const l = getLease(c.lease_id); return <tr key={p.id}><td><strong>{getRenter(l.renter_id).name}</strong><small>{getSpace(l.space_id).name} · {c.kind} due {dateLabel(c.due_date, true)}</small></td><td>{dateLabel(p.paid_date, true)}</td><td><strong className="number muted-green">{money(p.amount)}</strong></td><td>{p.method}<small>{p.reference || 'No reference'}</small></td><td><button className="icon-button" aria-label={`Undo ${money(p.amount)} payment`} onClick={() => open({ kind: 'delete', table: 'payments', id: p.id, label: `${money(p.amount)} payment for ${getRenter(l.renter_id).name}` })}><Trash2 size={16} /></button></td></tr>; })}</tbody></table></div> : <Empty icon={CreditCard} title="No payments recorded yet" description="Received a payment? Record it against a rent charge or deposit to keep your balances up to date." action="Record payment" onClick={() => paymentModal()} />; })()}</section>
-        </>}
-
-        {page === 'Settings' && <div className="settings-grid"><section className="panel settings-panel"><div className="panel-heading"><div><h2>Building details</h2><p>The foundations of your workspace</p></div><Building2 size={20} /></div><form className="settings-form" key={settings.name + settings.completion_date + settings.time_zone} onSubmit={async e => { e.preventDefault(); setBusy(true); setSettingsMessage(''); const data = Object.fromEntries(new FormData(e.currentTarget)); try { await request('settings', 'PUT', data); await refresh(); setToast('Building details saved'); } catch (e) { setSettingsMessage((e as Error).message); } finally { setBusy(false); } }}><Field label="Building name"><input name="name" defaultValue={settings.name} required maxLength={100} /></Field><Field label="Address"><textarea name="address" defaultValue={settings.address} rows={2} maxLength={250} placeholder="Street, neighborhood, city" /></Field><Field label="Target completion date" hint="A planning date. Lease and payment dates are set separately."><input type="date" name="completion_date" defaultValue={settings.completion_date} required /></Field><div className="form-grid"><Field label="Currency"><input value="USD — US Dollar" readOnly /></Field><Field label="Time zone" hint="Used for due dates and overdue balances."><input name="time_zone" defaultValue={settings.time_zone} required placeholder="Asia/Baghdad" /></Field></div>{settingsMessage && <div role="alert" className="form-error">{settingsMessage}</div>}<Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}<Check size={16} /></Button></form></section><div className="settings-aside"><AccountSecurity email={ownerEmail} /><section className="panel backup-panel"><div className="empty-icon"><ArrowDownToLine size={24} /></div><h2>Your records, to keep</h2><p>Download your building, renters, leases, charges, and payment records as a dated JSON backup.</p><Button variant="secondary" onClick={() => { download(`our-building-backup-${today}.json`, JSON.stringify({ format: 'our-building', version: 1, exported_at: new Date().toISOString(), ...state }, null, 2), 'application/json'); setToast('Building records downloaded'); }}><ArrowDownToLine size={16} />Download records</Button><small>Keep the file somewhere private. It includes renter contact details.</small></section><section className="settings-note"><Leaf size={21} /><h3>Built for your next chapter</h3><p>Manage shops, offices, and rooftop spaces together. Reserve before opening, then track rent on the dates you agree.</p></section></div></div>}
-        <footer className="page-footer"><span><span className="footer-dot" />A little more organized. A little more at ease.</span><span>Our Building · {settings.currency}</span></footer>
-      </main>
+  const mutate = async (path: string, method: string, data?: unknown) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request(path, method, data);
+      await refresh();
+      setForm(null);
+      setToast("Saved");
+      if (path === "agreements" && method === "POST")
+        go("Agreements", result.id);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!state)
+    return (
+      <div className="loading-screen">
+        <Building2 size={34} />
+        <h1>Our Building</h1>
+        {error ? (
+          <>
+            <p role="alert">{error}</p>
+            <Button onClick={() => refresh().catch((e) => setError(e.message))}>
+              Try again
+            </Button>
+          </>
+        ) : (
+          <p>Opening your workspace…</p>
+        )}
+      </div>
+    );
+  const {
+    today,
+    settings,
+    spaces,
+    people,
+    enquiries,
+    agreements,
+    charges,
+    payments,
+    documents,
+  } = state;
+  const person = (id: string) => people.find((p) => p.id === id)!;
+  const spaceNames = (ids: string[]) =>
+    ids
+      .map((id) => spaces.find((s) => s.id === id)?.name || "Unknown space")
+      .join(" + ");
+  const agreement = (id: string) => agreements.find((a) => a.id === id)!;
+  const matches = (...values: (string | undefined)[]) =>
+    values.some((v) => v?.toLowerCase().includes(search.toLowerCase()));
+  const selected = agreements.find((a) => a.id === selectedId);
+  const securedAgreements = agreements.filter((a) =>
+    ["secured", "active"].includes(a.status),
+  );
+  const allocation = (id: string) =>
+    securedAgreements.find((a) => a.space_ids.includes(id));
+  const allocated = spaces.filter((s) => allocation(s.id)).length;
+  const openCalls = enquiries.filter(
+    (e) =>
+      !e.archived &&
+      !agreements.some(
+        (a) => a.enquiry_id === e.id && a.secured && !a.cancelled_on,
+      ),
+  );
+  const activePayments = payments.filter((p) => !p.void_reason);
+  const received = activePayments
+      .filter((p) => p.kind === "receipt")
+      .reduce((sum, p) => sum + p.amount, 0),
+    refunded = activePayments
+      .filter((p) => p.kind === "refund")
+      .reduce((sum, p) => sum + p.amount, 0);
+  const payable = charges.filter(
+    (c) =>
+      c.balance > 0 &&
+      (c.kind === "initial" || agreement(c.agreement_id).secured),
+  );
+  const overdue = payable.filter((c) => c.due_date && c.due_date < today);
+  const firstHalf = charges.filter(
+    (c) => c.kind === "initial" && c.balance > 0 && c.status !== "cancelled",
+  );
+  const downloadLedger = () => {
+    const rows = [
+      [
+        "Tenant",
+        "Spaces",
+        "Year",
+        "Installment",
+        "Due date",
+        "Amount USD",
+        "Received USD",
+        "Outstanding USD",
+        "Status",
+      ],
+      ...charges.map((c) => {
+        const a = agreement(c.agreement_id);
+        return [
+          person(a.person_id).name,
+          spaceNames(a.space_ids),
+          c.year,
+          chargeLabel(c),
+          c.due_date || "Awaiting start",
+          (c.amount / 100).toFixed(2),
+          (c.paid / 100).toFixed(2),
+          (c.balance / 100).toFixed(2),
+          c.status,
+        ];
+      }),
+    ];
+    download(
+      `annual-rent-ledger-${today}.csv`,
+      "\uFEFF" + rows.map((row) => row.map(csv).join(",")).join("\r\n"),
+      "text/csv;charset=utf-8",
+    );
+  };
+  const record = (c: Charge) =>
+    open({ kind: "payment", agreement: agreement(c.agreement_id), charge: c });
+  const rentTable = (list: Charge[], compact = false) => (
+    <div className="table-scroll rent-table">
+      <table>
+        <thead>
+          <tr>
+            {!compact && <th>Tenant / spaces</th>}
+            <th>Payment</th>
+            <th>Due</th>
+            <th>Remaining</th>
+            <th>Status</th>
+            <th>
+              <span className="sr-only">Action</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.map((c) => {
+            const a = agreement(c.agreement_id);
+            return (
+              <tr key={c.id}>
+                {!compact && (
+                  <td className="tenant-cell">
+                    <button
+                      className="text-button strong"
+                      onClick={() => go("Agreements", a.id)}
+                    >
+                      {person(a.person_id).name}
+                    </button>
+                    <small>{spaceNames(a.space_ids)}</small>
+                  </td>
+                )}
+                <td data-label="Payment">
+                  {chargeLabel(c)}
+                  <small>
+                    Year {c.year} · {money(c.amount)} total
+                  </small>
+                </td>
+                <td data-label="Due">{dateLabel(c.due_date)}</td>
+                <td className="money" data-label="Remaining">
+                  {money(c.balance)}
+                  {c.paid > 0 && <small>{money(c.paid)} received</small>}
+                </td>
+                <td data-label="Status">
+                  <Badge status={c.status} />
+                </td>
+                <td className="payment-action">
+                  {c.balance > 0 && (
+                    <Button variant="secondary small" onClick={() => record(c)}>
+                      Record
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {!list.length && (
+        <div className="table-empty">No payments in this view.</div>
+      )}
     </div>
-    {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification"><X size={15} /></button></div>}
-    {modal && <ModalFrame busy={busy} close={() => setModal(null)} title={modal.kind === 'space' ? `${modal.record ? 'Edit' : 'Add a'} space` : modal.kind === 'renter' ? `${modal.record ? 'Edit' : 'Add a'} renter` : modal.kind === 'lease' ? `${modal.record ? 'Edit' : 'Create a'} lease` : modal.kind === 'payment' ? 'Record a payment' : modal.kind === 'end' ? 'End this lease' : modal.kind === 'delete' ? 'Remove this record?' : 'Lease details'} subtitle={modal.kind === 'space' ? 'Give each part of your building a place.' : modal.kind === 'renter' ? 'The people behind your building’s next chapter.' : modal.kind === 'lease' ? 'Set the space, dates, and payment agreement.' : modal.kind === 'payment' ? 'Record money you have already received.' : modal.kind === 'end' ? 'Stop rent charges after the new end date.' : modal.kind === 'delete' ? 'Check the details before continuing.' : 'Everything agreed, in one place.'}>
-      {modal.kind === 'details' ? (() => { const l = modal.record; const hasPayments = payments.some(p => charges.some(c => c.id === p.charge_id && c.lease_id === l.id)); return <div className="modal-body"><div className="lease-detail-heading"><div><span className="eyebrow">{getSpace(l.space_id).type.toUpperCase()}</span><h3>{getSpace(l.space_id).name}</h3><p>{getRenter(l.renter_id).name}</p></div><Badge status={l.status} /></div><dl className="detail-grid"><div><dt>Lease start</dt><dd>{dateLabel(l.start_date, true)}</dd></div><div><dt>Lease end (inclusive)</dt><dd>{dateLabel(l.end_date, true)}</dd></div><div><dt>Monthly rent</dt><dd>{money(l.monthly_rent)}</dd></div><div><dt>First rent due</dt><dd>{dateLabel(l.first_due_date, true)}</dd></div><div><dt>Security deposit</dt><dd>{money(l.deposit)}</dd></div><div><dt>Deposit due</dt><dd>{l.deposit ? dateLabel(l.deposit_due_date, true) : 'Not applicable'}</dd></div></dl>{l.notes && <div className="detail-notes"><h4>Notes</h4><p>{l.notes}</p></div>}<div className="info-note"><CalendarDays size={18} /><p>Rent repeats on day {Number(l.first_due_date.slice(-2))} each month, or the last day of shorter months. Full monthly charges; no automatic proration.</p></div><div className="modal-actions wrap">{!hasPayments && <Button variant="secondary" onClick={() => open({ kind: 'lease', record: l })}><Pencil size={15} />Edit lease</Button>}{l.status !== 'ended' && <Button variant="secondary" onClick={() => open({ kind: 'end', record: l })}>End lease</Button>}{!hasPayments && <Button variant="danger-ghost" onClick={() => open({ kind: 'delete', table: 'leases', id: l.id, label: `lease for ${getSpace(l.space_id).name}` })}><Trash2 size={15} />Delete lease</Button>}</div>{hasPayments && <p className="helper-text">Financial terms are locked once payments are recorded, keeping your payment history consistent.</p>}</div>; })() : modal.kind === 'delete' ? <div className="modal-body"><div className="delete-warning"><Trash2 size={22} /><p>Remove the <strong>{modal.label}</strong>? {modal.table === 'payments' ? 'The amount will be added back to the outstanding balance. This only corrects your records; it does not refund money.' : modal.table === 'leases' ? 'Its unpaid charges will also be removed.' : 'This cannot be undone.'}</p></div>{error && <div className="form-error" role="alert">{error}</div>}<div className="modal-actions"><Button variant="secondary" onClick={() => setModal(null)} disabled={busy}>Keep record</Button><Button variant="danger" disabled={busy} onClick={() => mutate(`${modal.table}/${modal.id}`, 'DELETE', undefined, 'Record removed')}>{busy ? 'Removing…' : 'Remove record'}</Button></div></div> : modal.kind === 'lease' && (!spaces.length || !renters.length) ? <div className="modal-body"><Empty icon={!spaces.length ? Building2 : Users} title={!spaces.length ? 'First, add a space' : 'First, add a renter'} description="A lease connects one renter to a space in your building. Add both before creating an agreement." action={!spaces.length ? 'Add a space' : 'Add a renter'} onClick={() => open({ kind: !spaces.length ? 'space' : 'renter' })} /></div> : modal.kind === 'payment' && !charges.some(c => c.balance > 0) ? <div className="modal-body"><Empty icon={CheckCircle2} title={charges.length ? 'All charges are paid' : 'No charges to pay yet'} description={charges.length ? 'Every scheduled charge has been paid in full.' : 'Create a lease first to generate rent and deposit charges.'} action={!charges.length ? 'Create a lease' : undefined} onClick={() => open({ kind: 'lease' })} /></div> : <form className="modal-body" onSubmit={(e: FormEvent<HTMLFormElement>) => {
-        e.preventDefault(); const data: Record<string, unknown> = Object.fromEntries(new FormData(e.currentTarget));
-        if (modal.kind === 'space') { data.ready = data.ready === 'true'; mutate(`spaces${modal.record ? '/' + modal.record.id : ''}`, modal.record ? 'PUT' : 'POST', data, 'Space saved'); }
-        if (modal.kind === 'renter') mutate(`renters${modal.record ? '/' + modal.record.id : ''}`, modal.record ? 'PUT' : 'POST', data, 'Renter saved');
-        if (modal.kind === 'lease') mutate(`leases${modal.record ? '/' + modal.record.id : ''}`, modal.record ? 'PUT' : 'POST', data, 'Lease saved and payment schedule created');
-        if (modal.kind === 'payment') mutate('payments', 'POST', { ...data, id: modal.paymentId }, 'Payment recorded');
-        if (modal.kind === 'end') mutate(`leases/${modal.record.id}/end`, 'POST', data, 'Lease end date updated');
-      }}>
-        {modal.kind === 'space' && <div className="form-grid"><Field wide label="Space name"><input autoComplete="off" name="name" required maxLength={80} defaultValue={modal.record?.name} placeholder="e.g. Shop G01 or Rooftop terrace" /></Field><Field label="Space type"><select name="type" defaultValue={modal.record?.type || 'Shop'}><option>Shop</option><option>Office</option><option>Rooftop</option></select></Field><Field label="Floor / level"><input name="floor" required maxLength={40} defaultValue={modal.record?.floor} placeholder="e.g. Ground floor" /></Field><Field label="Area (m²)"><input name="area" type="number" min="0.01" max="1000000" step="0.01" required defaultValue={modal.record?.area} placeholder="85" /></Field><Field label="Handover readiness"><select name="ready" defaultValue={String(Boolean(modal.record?.ready))}><option value="false">Under construction</option><option value="true">Ready for handover</option></select></Field><Field wide label="Notes (optional)"><textarea name="notes" rows={3} maxLength={3000} defaultValue={modal.record?.notes} placeholder="Frontage, utilities, access, or special features…" /></Field></div>}
-        {modal.kind === 'renter' && <div className="form-grid"><Field wide label="Full name"><input name="name" required maxLength={100} defaultValue={modal.record?.name} autoComplete="name" placeholder="Renter’s full name" /></Field><Field wide label="Business / company (optional)"><input name="company" maxLength={100} defaultValue={modal.record?.company} placeholder="Business name" /></Field><Field label="Phone (optional)"><input name="phone" type="tel" maxLength={50} defaultValue={modal.record?.phone} autoComplete="tel" placeholder="Phone number" /></Field><Field label="Email (optional)"><input name="email" type="email" maxLength={250} defaultValue={modal.record?.email} autoComplete="email" placeholder="name@example.com" /></Field><Field wide label="Notes (optional)"><textarea name="notes" rows={3} maxLength={3000} defaultValue={modal.record?.notes} placeholder="Anything useful to remember…" /></Field></div>}
-        {modal.kind === 'lease' && <><div className="form-grid"><Field label="Space"><select name="space_id" required defaultValue={modal.record?.space_id || modal.spaceId || ''}><option value="" disabled>Choose a space</option>{spaces.map(s => <option value={s.id} key={s.id}>{s.name} · {s.area} m²</option>)}</select></Field><Field label="Renter"><select name="renter_id" required defaultValue={modal.record?.renter_id || ''}><option value="" disabled>Choose a renter</option>{renters.map(r => <option value={r.id} key={r.id}>{r.name}</option>)}</select></Field><Field label="Lease start date"><input name="start_date" type="date" required defaultValue={modal.record?.start_date || today} /></Field><Field label="Lease end date (inclusive)"><input name="end_date" type="date" required defaultValue={modal.record?.end_date || nextYear(today)} /></Field><Field label="Monthly rent (USD)"><input name="monthly_rent" type="number" step="0.01" min="0.01" max="999999999.99" required defaultValue={modal.record ? modal.record.monthly_rent / 100 : ''} placeholder="1,000.00" /></Field><Field label="First rent due date" hint="Monthly billing starts on this date."><input name="first_due_date" type="date" required defaultValue={modal.record?.first_due_date || today} /></Field><Field label="Security deposit (USD)"><input name="deposit" type="number" step="0.01" min="0" max="999999999.99" defaultValue={modal.record ? modal.record.deposit / 100 : '0'} /></Field><Field label="Deposit due date"><input name="deposit_due_date" type="date" required defaultValue={modal.record?.deposit_due_date || today} /></Field><Field wide label="Agreement notes (optional)"><textarea name="notes" rows={2} maxLength={3000} defaultValue={modal.record?.notes} placeholder="Fit-out period, agreed terms, or other details…" /></Field></div><div className="info-note"><CalendarDays size={18} /><p>Future start dates reserve the space. Rent is charged monthly from the first due date. Full monthly amounts apply; no automatic proration.</p></div></>}
-        {modal.kind === 'payment' && <><Field label="Payment for"><select name="charge_id" required value={selectedCharge} onChange={e => setSelectedCharge(e.target.value)}><option value="" disabled>Choose a rent charge or deposit</option>{charges.filter(c => c.balance > 0).map(c => { const l = getLease(c.lease_id); return <option key={c.id} value={c.id}>{getSpace(l.space_id).name} · {getRenter(l.renter_id).name} · {c.kind} {dateLabel(c.due_date, true)} · {money(c.balance)} left</option>; })}</select></Field>{selectedCharge && <div className="payment-balance"><span>Remaining balance</span><strong>{money(charges.find(c => c.id === selectedCharge)?.balance || 0)}</strong></div>}<div className="form-grid"><Field label="Amount received (USD)"><input key={selectedCharge} name="amount" type="number" step="0.01" min="0.01" max={selectedCharge ? (charges.find(c => c.id === selectedCharge)?.balance || 0) / 100 : undefined} required defaultValue={selectedCharge ? ((charges.find(c => c.id === selectedCharge)?.balance || 0) / 100).toFixed(2) : ''} /></Field><Field label="Date received"><input name="paid_date" type="date" required max={today} defaultValue={today} /></Field><Field label="Payment method"><select name="method"><option>Cash</option><option>Bank transfer</option><option>Card</option><option>Other</option></select></Field><Field label="Reference (optional)"><input name="reference" maxLength={250} placeholder="Receipt or transfer reference" /></Field></div><p className="helper-text">Partial payments are welcome. The remaining balance stays due. This records a payment; it does not charge the renter.</p></>}
-        {modal.kind === 'end' && <><Field label="New lease end date" hint="The end date is inclusive. Rent already due remains payable."><input type="date" name="end_date" required min={modal.record.start_date} max={modal.record.end_date} defaultValue={today >= modal.record.start_date && today <= modal.record.end_date ? today : modal.record.end_date} /></Field><div className="info-note"><FileText size={18} /><p>Unpaid rent charges after this date will be removed. Deposits and payments already received are preserved. Rent is not automatically prorated or refunded.</p></div></>}
-        {error && <div className="form-error" role="alert">{error}</div>}
-        <div className="modal-actions">{(modal.kind === 'space' || modal.kind === 'renter') && modal.record && <button className="icon-button danger-text" type="button" aria-label={`Delete ${modal.kind}`} disabled={busy} onClick={() => open({ kind: 'delete', table: modal.kind === 'space' ? 'spaces' : 'renters', id: modal.record!.id, label: modal.record!.name })}><Trash2 size={18} /></button>}<Button variant="secondary" onClick={() => setModal(null)} disabled={busy}>Cancel</Button><Button type="submit" disabled={busy}>{busy ? 'Saving…' : modal.kind === 'payment' ? 'Record payment' : modal.kind === 'end' ? 'Update end date' : modal.kind === 'lease' ? 'Save lease' : modal.kind === 'space' ? 'Save space' : 'Save renter'}{!busy && <Check size={16} />}</Button></div>
-      </form>}
-    </ModalFrame>}
-  </div>;
+  );
+  const headers: Record<Page, { title: string; description: string }> = {
+    Overview: {
+      title: "Your building, at a glance.",
+      description:
+        "Keep the next conversation, agreement, and payment in view.",
+    },
+    "Calls & interest": {
+      title: "Every conversation, remembered.",
+      description:
+        "Capture interest. Follow up. Turn a conversation into an agreement.",
+    },
+    Spaces: {
+      title: "A clear view of every space.",
+      description: "Your numbered shops, offices, and rooftop areas.",
+    },
+    Agreements: {
+      title: "Every agreement, in one place.",
+      description:
+        "Combined spaces, annual rent terms, payments, and paperwork.",
+    },
+    Payments: {
+      title: "Know what’s due. Know what’s paid.",
+      description: "Track annual rent, installments, and refunds.",
+    },
+    Settings: {
+      title: "Building settings",
+      description: "Building dates, records, and your owner account.",
+    },
+  };
+  const overview = (
+    <>
+      <div
+        className={`completion-strip ${settings.completed_date ? "completed" : ""}`}
+      >
+        <div className="strip-icon">
+          {settings.completed_date ? (
+            <CheckCircle2 size={23} />
+          ) : (
+            <HardHat size={23} />
+          )}
+        </div>
+        <div>
+          <strong>
+            {settings.completed_date
+              ? "The building is open"
+              : "Preparing for opening"}
+          </strong>
+          <p>
+            {settings.completed_date
+              ? `Completed ${dateLabel(settings.completed_date)} · initial leases share this anniversary.`
+              : `Estimated completion ${dateLabel(settings.completion_date)} · leases start when you confirm completion.`}
+          </p>
+        </div>
+        {!settings.completed_date && (
+          <Button
+            variant="secondary"
+            onClick={() => open({ kind: "complete" })}
+          >
+            Confirm completion
+            <ArrowRight size={15} />
+          </Button>
+        )}
+      </div>
+      <div className="metrics">
+        <div>
+          <span>
+            Open enquiries
+            <Phone size={16} />
+          </span>
+          <strong>{openCalls.length}</strong>
+          <small>People interested in your spaces</small>
+        </div>
+        <div>
+          <span>
+            Spaces secured
+            <Building2 size={16} />
+          </span>
+          <strong>
+            {allocated}
+            <em> / {spaces.length}</em>
+          </strong>
+          <small>
+            {spaces.length - allocated} available ·{" "}
+            {agreements.filter((a) => a.status === "active").length} active
+            agreements
+          </small>
+        </div>
+        <div>
+          <span>
+            Net rent received
+            <Wallet size={16} />
+          </span>
+          <strong>{money(received - refunded)}</strong>
+          <small>All time · {money(refunded)} refunded</small>
+        </div>
+        <div>
+          <span>
+            Overdue balance
+            <CalendarDays size={16} />
+          </span>
+          <strong className={overdue.length ? "warning-text" : ""}>
+            {money(overdue.reduce((s, c) => s + c.balance, 0))}
+          </strong>
+          <small>
+            {overdue.length} overdue payment{overdue.length === 1 ? "" : "s"}
+          </small>
+        </div>
+      </div>
+      {!spaces.length && (
+        <div className="getting-started panel">
+          <div>
+            <span className="eyebrow">START WITH YOUR BUILDING</span>
+            <h2>Ready for your first rental.</h2>
+            <p>
+              Add your numbered spaces, log interested callers, then agree the
+              terms.
+            </p>
+          </div>
+          <Button onClick={() => open({ kind: "space" })}>
+            <Plus size={16} />
+            Add your first space
+          </Button>
+        </div>
+      )}
+      <div className="overview-grid">
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Conversations to follow up</h2>
+              <p>Interest stays open until a space is secured.</p>
+            </div>
+            <button
+              className="text-button"
+              onClick={() => go("Calls & interest")}
+            >
+              View all
+              <ArrowUpRight size={14} />
+            </button>
+          </div>
+          {openCalls.length ? (
+            <div className="call-list">
+              {[...openCalls]
+                .sort((a, b) =>
+                  (a.follow_up || "9999").localeCompare(b.follow_up || "9999"),
+                )
+                .slice(0, 5)
+                .map((e) => (
+                  <div key={e.id} className="call-row">
+                    <span className="avatar">
+                      {person(e.person_id).name.slice(0, 2).toUpperCase()}
+                    </span>
+                    <div>
+                      <strong>{person(e.person_id).name}</strong>
+                      <small>
+                        {spaceNames(e.space_ids) || "Spaces not chosen"} ·{" "}
+                        {person(e.person_id).company ||
+                          person(e.person_id).phone}
+                      </small>
+                    </div>
+                    <div className="call-followup">
+                      <small>
+                        {e.follow_up
+                          ? dateLabel(e.follow_up)
+                          : "No follow-up date"}
+                      </small>
+                      <button
+                        className="text-button"
+                        onClick={() => open({ kind: "call", record: e })}
+                      >
+                        View call
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <Empty
+              title="No open conversations"
+              description="Log a call as soon as someone asks about renting."
+              action="Log a call"
+              onClick={() => open({ kind: "call" })}
+            />
+          )}
+        </section>
+        <section className="panel next-actions">
+          <div className="panel-heading">
+            <div>
+              <h2>Your next steps</h2>
+              <p>Move each agreement forward.</p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              go("Agreements");
+              setFilter("awaiting-payment");
+            }}
+          >
+            <span className="step-number">01</span>
+            <span>
+              <strong>{firstHalf.length} awaiting first payment</strong>
+              <small>Full first half secures the spaces</small>
+            </span>
+            <ArrowRight size={17} />
+          </button>
+          <button
+            onClick={() => {
+              go("Agreements");
+              setFilter("secured");
+            }}
+          >
+            <span className="step-number">02</span>
+            <span>
+              <strong>
+                {agreements.filter((a) => a.status === "secured").length}{" "}
+                secured agreement
+                {agreements.filter((a) => a.status === "secured").length === 1
+                  ? ""
+                  : "s"}
+              </strong>
+              <small>Ready for their lease start</small>
+            </span>
+            <ArrowRight size={17} />
+          </button>
+          <button onClick={() => go("Payments")}>
+            <span className="step-number">03</span>
+            <span>
+              <strong>
+                {agreements.filter((a) => a.refund_due > 0).length} refunds to
+                settle
+              </strong>
+              <small>Based on your cancellation decisions</small>
+            </span>
+            <ArrowRight size={17} />
+          </button>
+          <div className="next-note">
+            <FileText size={18} />
+            <p>
+              Keep the signed contract and payment records together in each
+              agreement.
+            </p>
+          </div>
+        </section>
+      </div>
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Payments needing attention</h2>
+            <p>Overdue amounts and rent due in the next 30 days.</p>
+          </div>
+          <button className="text-button" onClick={() => go("Payments")}>
+            All payments
+            <ArrowUpRight size={14} />
+          </button>
+        </div>
+        {rentTable(
+          payable
+            .filter(
+              (c) =>
+                c.due_date &&
+                c.due_date <=
+                  new Date(Date.parse(today) + 30 * 86400000)
+                    .toISOString()
+                    .slice(0, 10),
+            )
+            .slice(0, 6),
+        )}
+      </section>
+    </>
+  );
+  const callsView = (
+    <>
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={17} />
+          <input
+            aria-label="Search calls"
+            placeholder="Search name, phone, business, or notes"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="tabs">
+          <button
+            className={!contacts ? "active" : ""}
+            onClick={() => setContacts(false)}
+          >
+            Calls & interest
+          </button>
+          <button
+            className={contacts ? "active" : ""}
+            onClick={() => setContacts(true)}
+          >
+            Contacts
+          </button>
+        </div>
+        {!contacts && (
+          <select
+            aria-label="Enquiry filter"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          >
+            <option>All</option>
+            <option>Open</option>
+            <option>Archived</option>
+          </select>
+        )}
+      </div>
+      {contacts ? (
+        <section className="panel">
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Phone</th>
+                  <th>Business</th>
+                  <th>Email</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {people
+                  .filter((p) => matches(p.name, p.phone, p.company, p.email))
+                  .map((p) => (
+                    <tr key={p.id}>
+                      <td className="strong">{p.name}</td>
+                      <td>
+                        <a href={"tel:" + p.phone}>{p.phone}</a>
+                      </td>
+                      <td>{p.company || "—"}</td>
+                      <td>{p.email || "—"}</td>
+                      <td>
+                        <Button
+                          variant="secondary small"
+                          onClick={() => open({ kind: "person", record: p })}
+                        >
+                          Edit
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          {!people.length && (
+            <Empty
+              title="Your contacts will appear here"
+              description="Log your first call to save the caller's details."
+            />
+          )}
+        </section>
+      ) : (
+        <div className="enquiry-grid">
+          {enquiries
+            .filter(
+              (e) =>
+                (filter === "All" ||
+                  (filter === "Archived" ? e.archived : !e.archived)) &&
+                matches(
+                  person(e.person_id).name,
+                  person(e.person_id).phone,
+                  person(e.person_id).company,
+                  e.notes,
+                  spaceNames(e.space_ids),
+                ),
+            )
+            .map((e) => {
+              const p = person(e.person_id),
+                linked = agreements.filter((a) => a.enquiry_id === e.id);
+              return (
+                <article className="panel enquiry-card" key={e.id}>
+                  <div className="card-top">
+                    <span className="avatar">
+                      {p.name.slice(0, 2).toUpperCase()}
+                    </span>
+                    <div>
+                      <h3>{p.name}</h3>
+                      <p>{p.company || "Business not specified"}</p>
+                    </div>
+                    <Badge status={e.archived ? "ended" : "interested"}>
+                      {e.archived ? "Archived" : "Interested"}
+                    </Badge>
+                  </div>
+                  <a className="phone-link" href={"tel:" + p.phone}>
+                    <Phone size={14} />
+                    {p.phone}
+                  </a>
+                  <div className="space-tags">
+                    {e.space_ids.length ? (
+                      e.space_ids.map((id) => (
+                        <span key={id}>
+                          {spaceNames([id])}
+                          {allocation(id) && <small> · taken</small>}
+                        </span>
+                      ))
+                    ) : (
+                      <span>Spaces not chosen yet</span>
+                    )}
+                  </div>
+                  <p className="notes">{e.notes || "No call notes yet."}</p>
+                  <div className="card-dates">
+                    <span>Called {dateLabel(e.called_on)}</span>
+                    <span>
+                      {e.follow_up
+                        ? "Follow up " + dateLabel(e.follow_up)
+                        : "No follow-up date"}
+                    </span>
+                  </div>
+                  {linked.map((a) => (
+                    <button
+                      key={a.id}
+                      className="linked-agreement"
+                      onClick={() => go("Agreements", a.id)}
+                    >
+                      View agreement
+                      <Badge status={a.status} />
+                      <ArrowRight size={15} />
+                    </button>
+                  ))}
+                  <div className="card-footer">
+                    <Button
+                      variant="secondary small"
+                      onClick={() => open({ kind: "call", record: e })}
+                    >
+                      Edit call
+                    </Button>
+                    <Button
+                      variant="small"
+                      onClick={() => open({ kind: "agreement", enquiry: e })}
+                    >
+                      Prepare agreement
+                      <ArrowRight size={14} />
+                    </Button>
+                  </div>
+                </article>
+              );
+            })}
+          {!enquiries.length && (
+            <Empty
+              title="Start with a conversation"
+              description="Capture a caller's name, phone, and the spaces they like. No space is held at this stage."
+              action="Log a call"
+              onClick={() => open({ kind: "call" })}
+            />
+          )}
+        </div>
+      )}
+    </>
+  );
+  const spacesView = (
+    <>
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={17} />
+          <input
+            aria-label="Search spaces"
+            placeholder="Search space number or floor"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <select
+          aria-label="Space filter"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        >
+          {["All", "Available", "Taken", "Shop", "Office", "Rooftop"].map(
+            (s) => (
+              <option key={s}>{s}</option>
+            ),
+          )}
+        </select>
+        <span className="muted">
+          {spaces.length} spaces ·{" "}
+          {spaces.reduce((sum, s) => sum + s.area, 0).toLocaleString()} m²
+        </span>
+      </div>
+      <div className="space-grid">
+        {spaces
+          .filter(
+            (s) =>
+              matches(s.name, s.floor, s.type) &&
+              (filter === "All" ||
+                filter === s.type ||
+                (filter === "Taken"
+                  ? allocation(s.id)
+                  : filter === "Available"
+                    ? !allocation(s.id)
+                    : false)),
+          )
+          .map((s) => {
+            const a = allocation(s.id),
+              interest = enquiries.filter(
+                (e) => !e.archived && e.space_ids.includes(s.id),
+              );
+            return (
+              <article className="panel space-card" key={s.id}>
+                <div className="space-card-heading">
+                  <div className="space-icon">
+                    <Building2 size={23} />
+                  </div>
+                  <Badge status={a?.status || "available"} />
+                </div>
+                <h2>{s.name}</h2>
+                <p>
+                  {s.type} · {s.floor}
+                </p>
+                <strong className="area">
+                  {s.area.toLocaleString()} <small>m²</small>
+                </strong>
+                {a ? (
+                  <button
+                    className="space-tenant"
+                    onClick={() => go("Agreements", a.id)}
+                  >
+                    <Users size={16} />
+                    <span>
+                      {person(a.person_id).name}
+                      <small>
+                        {a.space_ids.length > 1
+                          ? `Part of ${a.space_ids.length}-space agreement`
+                          : dateLabel(a.effective_start)}
+                      </small>
+                    </span>
+                    <ArrowRight size={15} />
+                  </button>
+                ) : (
+                  <button
+                    className="space-tenant"
+                    onClick={() => {
+                      go("Calls & interest");
+                      setSearch(s.name);
+                    }}
+                  >
+                    <Phone size={16} />
+                    <span>
+                      {interest.length} interested caller
+                      {interest.length === 1 ? "" : "s"}
+                      <small>Available until the first half is paid</small>
+                    </span>
+                    <ArrowRight size={15} />
+                  </button>
+                )}
+                {s.notes && <p className="notes">{s.notes}</p>}
+                <div className="card-footer">
+                  <Button
+                    variant="secondary small"
+                    onClick={() => open({ kind: "space", record: s })}
+                  >
+                    <Pencil size={13} />
+                    Edit
+                  </Button>
+                  <Button
+                    variant="secondary small"
+                    onClick={() => open({ kind: "call", spaceId: s.id })}
+                  >
+                    Log interest
+                  </Button>
+                  {!interest.length &&
+                    !agreements.some((a) => a.space_ids.includes(s.id)) && (
+                      <button
+                        className="icon-button"
+                        aria-label={`Delete ${s.name}`}
+                        onClick={() =>
+                          open({
+                            kind: "delete",
+                            table: "spaces",
+                            id: s.id,
+                            name: s.name,
+                          })
+                        }
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    )}
+                </div>
+              </article>
+            );
+          })}
+        {!spaces.length && (
+          <Empty
+            title="Add your numbered spaces"
+            description="Each shop, office, and rooftop area stays separate, even when rented together."
+            action="Add space"
+            onClick={() => open({ kind: "space" })}
+          />
+        )}
+      </div>
+    </>
+  );
+  const agreementsView = (
+    <>
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={17} />
+          <input
+            aria-label="Search agreements"
+            placeholder="Search tenant, spaces, or notes"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <select
+          aria-label="Agreement filter"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        >
+          <option value="All">All agreements</option>
+          <option value="awaiting-payment">Awaiting first payment</option>
+          <option value="secured">Secured</option>
+          <option value="active">Active</option>
+          <option value="ended">Ended</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </div>
+      <section className="panel">
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Tenant / spaces</th>
+                <th>Annual rent</th>
+                <th>Lease start</th>
+                <th>Received</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {agreements
+                .filter(
+                  (a) =>
+                    (filter === "All" || a.status === filter) &&
+                    matches(
+                      person(a.person_id).name,
+                      spaceNames(a.space_ids),
+                      a.notes,
+                    ),
+                )
+                .map((a) => (
+                  <tr key={a.id}>
+                    <td>
+                      <button
+                        className="text-button strong"
+                        onClick={() => go("Agreements", a.id)}
+                      >
+                        {person(a.person_id).name}
+                      </button>
+                      <small>{spaceNames(a.space_ids)}</small>
+                    </td>
+                    <td className="money">
+                      {money(a.annual_rent)}
+                      <small>
+                        Year 1 · {a.years} year{a.years === 1 ? "" : "s"}
+                        {a.rules.length ? " · varies by year" : ""}
+                      </small>
+                    </td>
+                    <td>{dateLabel(a.effective_start)}</td>
+                    <td className="money">
+                      {money(a.received - a.refunded)}
+                      {a.refund_due > 0 && (
+                        <small className="warning-text">
+                          {money(a.refund_due)} refund owed
+                        </small>
+                      )}
+                    </td>
+                    <td>
+                      <Badge status={a.status} />
+                    </td>
+                    <td>
+                      <Button
+                        variant="secondary small"
+                        onClick={() => go("Agreements", a.id)}
+                      >
+                        View agreement
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+        {!agreements.length && (
+          <Empty
+            title="From interest to agreement"
+            description="Choose a caller and their spaces, then set one combined annual rent."
+            action={
+              people.length && spaces.length ? "New agreement" : undefined
+            }
+            onClick={() => open({ kind: "agreement" })}
+          />
+        )}
+      </section>
+    </>
+  );
+  const detail = (a: Agreement) => {
+    const p = person(a.person_id),
+      list = charges.filter((c) => c.agreement_id === a.id),
+      files = documents.filter((d) => d.agreement_id === a.id),
+      history = payments.filter((p) => p.agreement_id === a.id);
+    return (
+      <>
+        <button
+          className="text-button back-link"
+          onClick={() => go("Agreements")}
+        >
+          <ChevronLeft size={16} />
+          All agreements
+        </button>
+        <div className="agreement-heading">
+          <div>
+            <span className="eyebrow">
+              AGREEMENT · {spaceNames(a.space_ids)}
+            </span>
+            <h1>{p.name}</h1>
+            <p>
+              {p.company || "Tenant"} · <a href={"tel:" + p.phone}>{p.phone}</a>
+            </p>
+          </div>
+          <Badge status={a.status} />
+        </div>
+        <div className="detail-summary">
+          <div>
+            <small>Combined first-year rent</small>
+            <strong>{money(a.annual_rent)}</strong>
+          </div>
+          <div>
+            <small>Contract length</small>
+            <strong>
+              {a.years} year{a.years === 1 ? "" : "s"}
+            </strong>
+          </div>
+          <div>
+            <small>Lease starts</small>
+            <strong>{dateLabel(a.effective_start)}</strong>
+          </div>
+          <div>
+            <small>Lease ends</small>
+            <strong>
+              {a.end_date ? dateLabel(a.end_date) : "Set at completion"}
+            </strong>
+          </div>
+        </div>
+        {a.status === "awaiting-payment" && (
+          <div className="notice">
+            <strong>
+              {money(list.find((c) => c.kind === "initial")?.balance || 0)}{" "}
+              still needed to secure these spaces.
+            </strong>{" "}
+            Other interested people can still take them by paying first.
+          </div>
+        )}
+        {a.status === "secured" && (
+          <div className="notice success">
+            Spaces secured.{" "}
+            {a.effective_start
+              ? `The lease starts ${dateLabel(a.effective_start)}.`
+              : "The lease begins when you confirm building completion."}
+          </div>
+        )}
+        {a.cancelled_on && (
+          <div className="notice">
+            <strong>Cancelled {dateLabel(a.cancelled_on)}.</strong>{" "}
+            {a.cancel_reason}
+            <br />
+            Agreed amount kept: {money(a.retained)} · Refunded:{" "}
+            {money(a.refunded)} · Refund owed: {money(a.refund_due)}
+            {a.refund_due > 0 && (
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  open({ kind: "payment", agreement: a, refund: true })
+                }
+              >
+                Record refund
+              </Button>
+            )}
+          </div>
+        )}
+        <div className="detail-actions">
+          {!a.cancelled_on && list.some((c) => c.balance > 0) && (
+            <Button onClick={() => open({ kind: "payment", agreement: a })}>
+              <Plus size={16} />
+              Record payment
+            </Button>
+          )}
+          {!a.cancelled_on && !history.length && (
+            <Button
+              variant="secondary"
+              onClick={() => open({ kind: "agreement", record: a })}
+            >
+              <Pencil size={15} />
+              Edit terms
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            onClick={() => open({ kind: "person", record: p })}
+          >
+            Edit contact
+          </Button>
+          {!a.cancelled_on && (
+            <Button
+              variant="ghost danger"
+              onClick={() => open({ kind: "cancel", agreement: a })}
+            >
+              Cancel agreement
+            </Button>
+          )}
+        </div>
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Rent schedule</h2>
+              <p>
+                First year in two installments. Later years are due on the lease
+                anniversary.
+              </p>
+            </div>
+          </div>
+          {rentTable(list, true)}
+        </section>
+        <div className="overview-grid">
+          <section className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Payment history</h2>
+                <p>Receipts and refunds are kept with the agreement.</p>
+              </div>
+            </div>
+            {history.length ? (
+              <div className="payment-history">
+                {history.map((p) => (
+                  <div key={p.id} className={p.void_reason ? "voided" : ""}>
+                    <div>
+                      <strong>
+                        {p.kind === "refund" ? "Refund" : "Received"}{" "}
+                        {money(p.amount)}
+                      </strong>
+                      <small>
+                        {dateLabel(p.paid_date)} · {p.method} ·{" "}
+                        {p.reference || "No reference"}
+                      </small>
+                      {p.void_reason && <small>Voided: {p.void_reason}</small>}
+                    </div>
+                    {!p.void_reason &&
+                      !(p.kind === "receipt" && a.cancelled_on) &&
+                      !(
+                        p.kind === "receipt" &&
+                        list.find((c) => c.id === p.charge_id)?.kind ===
+                          "initial" &&
+                        a.secured &&
+                        a.effective_start &&
+                        a.effective_start <= today
+                      ) && (
+                        <button
+                          className="text-button"
+                          onClick={() => open({ kind: "void", payment: p })}
+                        >
+                          Correct entry
+                        </button>
+                      )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty
+                title="No payments recorded"
+                description="Record the first payment when the money arrives."
+              />
+            )}
+          </section>
+          <section className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Documents</h2>
+                <p>PDF, JPEG, or PNG · up to 10 MB each</p>
+              </div>
+              <Button
+                variant="secondary small"
+                disabled={busy}
+                onClick={() => uploadRef.current?.click()}
+              >
+                <Upload size={14} />
+                Upload copy
+              </Button>
+              <input
+                ref={uploadRef}
+                type="file"
+                className="sr-only"
+                aria-label="Upload agreement document"
+                accept="application/pdf,image/jpeg,image/png"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  setError("");
+                  if (file.size > 10 * 1024 * 1024) {
+                    setError("Upload a file up to 10 MB.");
+                    return;
+                  }
+                  setBusy(true);
+                  try {
+                    const response = await fetch(
+                      "/api/agreements/" + a.id + "/documents",
+                      {
+                        method: "POST",
+                        headers: {
+                          "Content-Type": file.type,
+                          "X-File-Name": encodeURIComponent(file.name),
+                        },
+                        body: file,
+                        credentials: "same-origin",
+                      },
+                    );
+                    if (!response.ok) {
+                      if (response.status === 401)
+                        window.dispatchEvent(new Event("session-expired"));
+                      throw new Error((await response.json()).error);
+                    }
+                    await refresh();
+                    setToast("Document uploaded");
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              />
+            </div>
+            {files.length ? (
+              <div className="document-list">
+                {files.map((f) => (
+                  <div key={f.id}>
+                    <FileText size={21} />
+                    <a href={"/api/documents/" + f.id} download>
+                      <strong>{f.name}</strong>
+                      <small>
+                        {Math.ceil(f.size / 1024)} KB ·{" "}
+                        {f.created_at.slice(0, 10)}
+                      </small>
+                    </a>
+                    <button
+                      className="icon-button"
+                      aria-label={`Remove ${f.name}`}
+                      onClick={() =>
+                        open({
+                          kind: "delete",
+                          table: "documents",
+                          id: f.id,
+                          name: f.name,
+                        })
+                      }
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty
+                title="Your paperwork belongs here"
+                description="Upload copies of signed contracts and payment receipts."
+              />
+            )}
+          </section>
+        </div>
+        {a.notes && (
+          <section className="panel note-panel">
+            <h2>Agreement notes</h2>
+            <p className="notes">{a.notes}</p>
+          </section>
+        )}
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Agreement activity</h2>
+          </div>
+          <div className="activity-list">
+            {state.activity
+              .filter((e) => e.agreement_id === a.id)
+              .map((e) => (
+                <div key={e.id}>
+                  <span />
+                  <p>
+                    {e.message}
+                    <small>
+                      {new Date(e.created_at).toLocaleString("en-GB", {
+                        timeZone: settings.time_zone,
+                      })}
+                    </small>
+                  </p>
+                </div>
+              ))}
+          </div>
+        </section>
+      </>
+    );
+  };
+  const paymentsView = (
+    <>
+      <div className="toolbar">
+        <div className="search-box">
+          <Search size={17} />
+          <input
+            aria-label="Search payments"
+            placeholder="Search tenant or space"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="tabs">
+          {["Due", "All scheduled", "History", "Refunds"].map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "active" : ""}
+              onClick={() => setTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      <section className="panel">
+        {tab === "Due" || tab === "All scheduled" ? (
+          rentTable(
+            (tab === "Due"
+              ? payable.filter((c) => c.due_date && c.due_date <= today)
+              : charges
+            ).filter((c) => {
+              const a = agreement(c.agreement_id);
+              return matches(person(a.person_id).name, spaceNames(a.space_ids));
+            }),
+          )
+        ) : tab === "Refunds" ? (
+          <div className="payment-history">
+            {agreements
+              .filter(
+                (a) =>
+                  a.refund_due > 0 &&
+                  matches(person(a.person_id).name, spaceNames(a.space_ids)),
+              )
+              .map((a) => (
+                <div key={a.id}>
+                  <div>
+                    <button
+                      className="text-button strong"
+                      onClick={() => go("Agreements", a.id)}
+                    >
+                      {person(a.person_id).name}
+                    </button>
+                    <small>
+                      {spaceNames(a.space_ids)} · {money(a.refund_due)} still
+                      owed
+                    </small>
+                  </div>
+                  <Button
+                    variant="secondary small"
+                    onClick={() =>
+                      open({ kind: "payment", agreement: a, refund: true })
+                    }
+                  >
+                    Record refund
+                  </Button>
+                </div>
+              ))}
+            {!agreements.some((a) => a.refund_due > 0) && (
+              <Empty
+                title="No refunds outstanding"
+                description="Any refund you agree on cancellation will appear here."
+              />
+            )}
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tenant / spaces</th>
+                  <th>Type</th>
+                  <th>Amount</th>
+                  <th>Date</th>
+                  <th>Method / reference</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payments
+                  .filter((p) => {
+                    const a = agreement(p.agreement_id);
+                    return matches(
+                      person(a.person_id).name,
+                      spaceNames(a.space_ids),
+                      p.reference,
+                    );
+                  })
+                  .map((p) => {
+                    const a = agreement(p.agreement_id);
+                    return (
+                      <tr key={p.id} className={p.void_reason ? "voided" : ""}>
+                        <td>
+                          <button
+                            className="text-button strong"
+                            onClick={() => go("Agreements", a.id)}
+                          >
+                            {person(a.person_id).name}
+                          </button>
+                          <small>{spaceNames(a.space_ids)}</small>
+                        </td>
+                        <td>
+                          {p.void_reason
+                            ? "Voided"
+                            : p.kind === "receipt"
+                              ? "Received"
+                              : "Refund"}
+                        </td>
+                        <td className="money">{money(p.amount)}</td>
+                        <td>{dateLabel(p.paid_date)}</td>
+                        <td>
+                          {p.method}
+                          <small>{p.reference || "—"}</small>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+            {!payments.length && (
+              <Empty
+                title="No payment history yet"
+                description="Record payments from the agreement or its rent schedule."
+              />
+            )}
+          </div>
+        )}
+      </section>
+    </>
+  );
+  const settingsView = (
+    <div className="settings-grid">
+      <section className="panel settings-panel">
+        <h2>Building information</h2>
+        <form
+          onSubmit={(e: FormEvent<HTMLFormElement>) => {
+            e.preventDefault();
+            mutate(
+              "settings",
+              "PUT",
+              Object.fromEntries(new FormData(e.currentTarget)),
+            );
+          }}
+        >
+          <Field label="Building name">
+            <input
+              name="name"
+              defaultValue={settings.name}
+              required
+              maxLength={100}
+            />
+          </Field>
+          <Field label="Address">
+            <input
+              name="address"
+              defaultValue={settings.address}
+              maxLength={250}
+            />
+          </Field>
+          <Field
+            label="Estimated completion date"
+            hint="Planning only. Actual completion is confirmed separately."
+          >
+            <input
+              type="date"
+              name="completion_date"
+              defaultValue={settings.completion_date}
+              required
+            />
+          </Field>
+          <Field label="Time zone">
+            <input
+              name="time_zone"
+              defaultValue={settings.time_zone}
+              required
+            />
+          </Field>
+          <Button type="submit" disabled={busy}>
+            Save building details
+          </Button>
+        </form>
+        <div className="settings-completion">
+          <strong>
+            {settings.completed_date
+              ? "Completed " + dateLabel(settings.completed_date)
+              : "Building completion is not yet confirmed"}
+          </strong>
+          {!settings.completed_date && (
+            <Button
+              variant="secondary"
+              onClick={() => open({ kind: "complete" })}
+            >
+              Confirm completion
+            </Button>
+          )}
+        </div>
+      </section>
+      <div className="settings-stack">
+        <AccountSecurity email={ownerEmail} />
+        <section className="panel settings-panel">
+          <h2>Your records</h2>
+          <p>
+            Download a copy of your records or the rent ledger. Uploaded files
+            can be downloaded from each agreement.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              download(
+                `building-records-${today}.json`,
+                JSON.stringify(state, null, 2),
+              )
+            }
+          >
+            <ArrowDownToLine size={16} />
+            Export records
+          </Button>
+          <Button variant="secondary" onClick={downloadLedger}>
+            <ArrowDownToLine size={16} />
+            Export rent ledger
+          </Button>
+          <small>
+            Exports contain private tenant information. Documents are included
+            in server database backups, not in this JSON export.
+          </small>
+        </section>
+      </div>
+    </div>
+  );
+  return (
+    <div className="app-shell">
+      {mobile && (
+        <button
+          className="mobile-scrim"
+          aria-label="Close navigation"
+          onClick={() => setMobile(false)}
+        />
+      )}
+      <aside className={`sidebar ${mobile ? "open" : ""}`}>
+        <a
+          className="wordmark"
+          href="/overview"
+          onClick={(e) => {
+            e.preventDefault();
+            go("Overview");
+          }}
+        >
+          <span>
+            <Building2 size={24} />
+          </span>
+          our building<span className="brand-dot">.</span>
+        </a>
+        <div className="property-label">
+          <Building2 size={20} />
+          <span>
+            <strong>{settings.name}</strong>
+            <small>Owner workspace</small>
+          </span>
+        </div>
+        <span className="nav-label">MANAGE YOUR BUILDING</span>
+        <nav aria-label="Main navigation">
+          {nav.map(({ name, icon: Icon }) => (
+            <button
+              key={name}
+              className={page === name ? "active" : ""}
+              onClick={() => go(name)}
+            >
+              <Icon size={19} />
+              <span>{name}</span>
+              {name === "Calls & interest" && openCalls.length > 0 && (
+                <em aria-hidden="true">{openCalls.length}</em>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="owner-card">
+            <span className="avatar">OB</span>
+            <span>
+              <strong>Building owner</strong>
+              <small>Private workspace · USD</small>
+            </span>
+          </div>
+          <button
+            className={page === "Settings" ? "active" : ""}
+            onClick={() => go("Settings")}
+          >
+            <Settings2 size={18} />
+            Building settings
+          </button>
+          <button
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onSignOut();
+              } catch (e) {
+                setError((e as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <LogOut size={17} />
+            Sign out
+          </button>
+        </div>
+      </aside>
+      <main className="main">
+        <header className="topbar">
+          <div>
+            <button
+              className="icon-button mobile-menu"
+              aria-label="Open navigation"
+              onClick={() => setMobile(true)}
+            >
+              <Menu size={22} />
+            </button>
+            <span>{settings.name}</span>
+            <span className="crumb">/</span>
+            <strong>{page}</strong>
+          </div>
+          <div>
+            <CalendarDays size={15} />
+            <span>{dateLabel(today)}</span>
+            <span className="top-owner">OB</span>
+          </div>
+        </header>
+        <div className="workspace">
+          {!(page === "Agreements" && selected) && (
+            <div className="page-heading">
+              <div>
+                <span className="eyebrow">
+                  {page === "Overview"
+                    ? "YOUR OWNER WORKSPACE"
+                    : page.toUpperCase()}
+                </span>
+                <h1>{headers[page].title}</h1>
+                <p>{headers[page].description}</p>
+              </div>
+              {page === "Overview" || page === "Calls & interest" ? (
+                <Button onClick={() => open({ kind: "call" })}>
+                  <Plus size={17} />
+                  Log a call
+                </Button>
+              ) : page === "Spaces" ? (
+                <Button onClick={() => open({ kind: "space" })}>
+                  <Plus size={17} />
+                  Add space
+                </Button>
+              ) : page === "Agreements" ? (
+                <Button
+                  disabled={!people.length || !spaces.length}
+                  onClick={() => open({ kind: "agreement" })}
+                >
+                  <Plus size={17} />
+                  New agreement
+                </Button>
+              ) : page === "Payments" ? (
+                <Button variant="secondary" onClick={downloadLedger}>
+                  <ArrowDownToLine size={16} />
+                  Export ledger
+                </Button>
+              ) : null}
+            </div>
+          )}
+          {error && !form && (
+            <div role="alert" className="form-error global-error">
+              {error}
+              <button
+                className="icon-button"
+                aria-label="Dismiss error"
+                onClick={() => setError("")}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
+          {state.legacy_count > 0 && (
+            <div className="notice">
+              {state.legacy_count} earlier monthly lease record(s) are preserved
+              separately and need review.{" "}
+              <button
+                className="text-button"
+                onClick={async () => {
+                  try {
+                    download(
+                      "earlier-records.json",
+                      JSON.stringify(await request("legacy"), null, 2),
+                    );
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                Download earlier records
+              </button>
+            </div>
+          )}
+          {page === "Overview" ? (
+            overview
+          ) : page === "Calls & interest" ? (
+            callsView
+          ) : page === "Spaces" ? (
+            spacesView
+          ) : page === "Agreements" ? (
+            selected ? (
+              detail(selected)
+            ) : selectedId ? (
+              <Empty
+                title="Agreement not found"
+                description="Return to your agreements to select an existing record."
+                action="View agreements"
+                onClick={() => go("Agreements")}
+              />
+            ) : (
+              agreementsView
+            )
+          ) : page === "Payments" ? (
+            paymentsView
+          ) : (
+            settingsView
+          )}
+          <footer className="workspace-footer">
+            <span>Your building. Every detail in place.</span>
+            <span>English · USD</span>
+          </footer>
+        </div>
+      </main>
+      {toast && (
+        <div className="toast" role="status">
+          <CheckCircle2 size={18} />
+          {toast}
+        </div>
+      )}
+      {form && (
+        <Modal
+          title={formTitles[form.kind]}
+          close={() => {
+            setForm(null);
+            setError("");
+          }}
+          busy={busy}
+        >
+          <RecordForm
+            spec={form}
+            state={state}
+            submit={mutate}
+            busy={busy}
+            error={error}
+            close={() => {
+              setForm(null);
+              setError("");
+            }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
 }

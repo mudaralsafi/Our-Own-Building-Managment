@@ -1,138 +1,472 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createStore, addMonths, cents, todayIn } from '../server/store.mjs';
-
-function fixture(t, filename = ':memory:') {
-  const store = createStore(filename, () => '2026-10-27');
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { createStore, addMonths, cents, todayIn } from "../server/store.mjs";
+import { annualSchedule } from "../shared/rent.mjs";
+function fixture(t, filename = ":memory:") {
+  let now = "2026-10-28";
+  const store = createStore(filename, () => now);
   t.after(() => store.close());
-  const space = store.saveSpace({ name: 'Shop G01', type: 'Shop', floor: 'Ground', area: 85.5, ready: false });
-  const renter = store.saveRenter({ name: 'Test Renter', email: 'renter@example.test' });
-  const terms = { space_id: space.id, renter_id: renter.id, start_date: '2026-10-01', end_date: '2027-09-30', first_due_date: '2026-10-01', monthly_rent: '1200.55', deposit: '1000', deposit_due_date: '2026-10-01' };
-  return { store, space, renter, terms };
+  const spaces = ["G01", "G02", "Roof"].map(
+    (name, i) =>
+      store.saveSpace({
+        name,
+        type: i === 2 ? "Rooftop" : "Shop",
+        floor: i === 2 ? "Roof" : "Ground",
+        area: 80 + i,
+      }).id,
+  );
+  const person = store.savePerson({
+    name: "Test Tenant",
+    phone: "+964 000 0000",
+    company: "Test Business",
+  }).id;
+  const terms = {
+    person_id: person,
+    space_ids: spaces.slice(0, 2),
+    agreed_on: now,
+    start_mode: "completion",
+    years: 4,
+    annual_rent: "12000",
+    rules: [],
+  };
+  const payment = (a, amount, extra = {}) => {
+    const charge = store
+      .state()
+      .charges.find((c) => c.agreement_id === a && c.kind === "initial");
+    return store.recordPayment({
+      id: crypto.randomUUID(),
+      agreement_id: a,
+      charge_id: charge.id,
+      kind: "receipt",
+      amount,
+      paid_date: now,
+      method: "Cash",
+      reference: "",
+      ...extra,
+    });
+  };
+  return {
+    store,
+    spaces,
+    person,
+    terms,
+    payment,
+    setToday: (value) => {
+      now = value;
+    },
+  };
 }
-const payment = (charge, overrides = {}) => ({ id: 'payment-one', charge_id: charge.id, amount: '400.20', paid_date: '2026-10-27', method: 'Bank transfer', reference: 'Receipt 001', ...overrides });
-
-test('money is stored exactly in cents and rejects ambiguous or negative amounts', () => {
-  assert.equal(cents('1200.55'), 120055);
-  assert.equal(cents('0.10'), 10);
-  assert.equal(cents('123.4'), 12340);
-  for (const invalid of ['-1', '1.001', '1e3', 'Infinity', '', '1,000', '0']) assert.throws(() => cents(invalid));
-  assert.equal(cents('0', 'Deposit', true), 0);
+test("exact USD amounts and annual rules handle fixed, additive, percentage and repeating increases", () => {
+  assert.equal(cents("0.10"), 10);
+  assert.equal(cents("1200.55"), 120055);
+  for (const v of ["-1", "1e3", "1.001", "", "Infinity", "0"])
+    assert.throws(() => cents(v));
+  assert.deepEqual(
+    annualSchedule("10000", 5, [
+      { year: 2, type: "add", value: "1000", repeat: false },
+      { year: 3, type: "percent", value: "5", repeat: true },
+      { year: 5, type: "set", value: "20000", repeat: false },
+    ]).map((r) => r.amount),
+    [1000000, 1100000, 1155000, 1212750, 2000000],
+  );
+  assert.deepEqual(
+    annualSchedule("10.01", 3, [
+      { year: 2, type: "percent", value: "5", repeat: true },
+    ]).map((r) => r.amount),
+    [1001, 1051, 1104],
+  );
+  assert.throws(() =>
+    annualSchedule("10", 2, [
+      { year: 3, type: "percent", value: "5", repeat: true },
+    ]),
+  );
+  assert.throws(() =>
+    annualSchedule("999999999", 50, [
+      { year: 2, type: "percent", value: "1000", repeat: true },
+    ]),
+  );
 });
-test('month-end billing preserves its original anchor, including leap years', () => {
-  assert.equal(addMonths('2027-01-31', 1), '2027-02-28');
-  assert.equal(addMonths('2027-01-31', 2), '2027-03-31');
-  assert.equal(addMonths('2028-01-31', 1), '2028-02-29');
-  assert.equal(todayIn('Asia/Baghdad', new Date('2026-10-26T22:00:00Z')), '2026-10-27');
+test("anniversaries preserve leap-day anchor; timezone is Baghdad", () => {
+  assert.equal(addMonths("2028-02-29", 12), "2029-02-28");
+  assert.equal(addMonths("2028-02-29", 48), "2032-02-29");
+  assert.equal(
+    todayIn("Asia/Baghdad", new Date("2026-10-27T22:00:00Z")),
+    "2026-10-28",
+  );
 });
-test('a future reservation can collect a deposit now without charging rent before opening', t => {
+test("multiple interested callers can share spaces indefinitely without allocation", (t) => {
+  const { store, spaces, person } = fixture(t);
+  for (let i = 0; i < 3; i++)
+    store.saveEnquiry({
+      person_id: person,
+      space_ids: spaces,
+      called_on: "2026-10-28",
+      archived: false,
+      notes: "Interested",
+    });
+  assert.equal(store.state().enquiries.length, 3);
+  assert.equal(store.state().agreements.length, 0);
+  const before = store.state().people.length;
+  assert.throws(() =>
+    store.saveEnquiry({
+      person: { name: "Invalid", phone: "123" },
+      space_ids: ["missing"],
+      called_on: "2026-10-28",
+      archived: false,
+    }),
+  );
+  assert.equal(
+    store.state().people.length,
+    before,
+    "failed call must not leave an orphan contact",
+  );
+});
+test("one combined annual price covers all spaces without duplicate rent or security deposits", (t) => {
   const { store, terms } = fixture(t);
-  const { id } = store.saveLease({ ...terms, start_date: '2027-04-01', end_date: '2028-03-31', first_due_date: '2027-05-01' });
-  const state = store.state();
-  assert.equal(state.leases[0].status, 'reserved');
-  assert.equal(state.charges.filter(c => c.kind === 'rent').length, 11);
-  assert.equal(state.charges.filter(c => c.kind === 'rent')[0].due_date, '2027-05-01');
-  const deposit = state.charges.find(c => c.kind === 'deposit');
-  assert.equal(deposit.amount, 100000);
-  assert.equal(deposit.status, 'overdue');
-  assert.equal(deposit.lease_id, id);
-  assert.equal(state.charges.filter(c => c.kind === 'rent' && c.due_date < terms.start_date).length, 0);
+  const a = store.saveAgreement(terms).id;
+  const s = store.state();
+  assert.equal(s.agreements[0].space_ids.length, 2);
+  assert.equal(s.agreements[0].status, "awaiting-payment");
+  assert.equal(s.charges.length, 5);
+  assert.equal(
+    s.charges.filter((c) => c.year === 1).reduce((n, c) => n + c.amount, 0),
+    1200000,
+  );
+  assert.equal(s.charges.filter((c) => c.kind === "deposit").length, 0);
+  assert.equal(s.charges.find((c) => c.kind === "completion").due_date, null);
+  assert.ok(s.charges.every((c) => c.agreement_id === a));
 });
-test('overlapping space allocations are blocked, including inclusive end dates', t => {
+test("partial payments secure all spaces only at the full first-half threshold", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id;
+  payment(a, "2000");
+  assert.equal(store.state().agreements[0].secured, false);
+  payment(a, "3999.99");
+  assert.equal(store.state().agreements[0].secured, false);
+  payment(a, "0.01");
+  assert.equal(store.state().agreements[0].status, "secured");
+  assert.equal(store.state().agreements[0].received, 600000);
+});
+test("first fully paid agreement wins; a competing agreement cannot receive more money for taken spaces", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id,
+    b = store.saveAgreement(terms).id;
+  payment(b, "100");
+  payment(a, "6000");
+  assert.throws(() => payment(b, "5900"), /already secured/);
+  assert.equal(
+    store.state().agreements.find((x) => x.id === b).received,
+    10000,
+  );
+  assert.equal(store.state().payments.length, 2);
+});
+test("duplicate receipt retries are idempotent and changed retries conflict", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id;
+  payment(a, "100", { id: "same" });
+  payment(a, "100", { id: "same" });
+  assert.equal(store.state().payments.length, 1);
+  assert.throws(() => payment(a, "101", { id: "same" }), /identifier/);
+  assert.throws(() => payment(a, "6000"), /exceeds/);
+});
+test("delaying the estimate leaves real start dates and annual charges unset", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id;
+  payment(a, "6000");
+  store.saveSettings({
+    name: "Test",
+    address: "",
+    completion_date: "2028-01-01",
+    time_zone: "Asia/Baghdad",
+  });
+  const s = store.state();
+  assert.equal(s.agreements[0].effective_start, "");
+  assert.ok(
+    s.charges
+      .filter((c) => c.kind !== "initial")
+      .every((c) => c.due_date === null && c.status === "awaiting-start"),
+  );
+});
+test("actual completion activates secured agreements, dates charges once, and retains partial receipts", (t) => {
+  const { store, terms, payment, setToday } = fixture(t);
+  const a = store.saveAgreement(terms).id;
+  payment(a, "6000");
+  setToday("2027-04-29");
+  store.completeBuilding({ completed_date: "2027-04-28" });
+  store.completeBuilding({ completed_date: "2027-04-28" });
+  let s = store.state();
+  assert.equal(s.agreements[0].status, "active");
+  assert.equal(s.agreements[0].effective_start, "2027-04-28");
+  assert.equal(s.agreements[0].end_date, "2031-04-27");
+  assert.equal(s.charges.length, 5);
+  assert.equal(
+    s.charges.find((c) => c.kind === "completion").status,
+    "overdue",
+  );
+  assert.equal(s.charges.find((c) => c.year === 2).due_date, "2028-04-28");
+  assert.equal(s.payments.length, 1);
+  assert.throws(
+    () => store.completeBuilding({ completed_date: "2027-04-29" }),
+    /already/,
+  );
+});
+test("completion cannot be guessed from a future date or put before agreement dates", (t) => {
   const { store, terms } = fixture(t);
-  store.saveLease(terms);
-  assert.throws(() => store.saveLease(terms), /already allocated/);
-  assert.throws(() => store.saveLease({ ...terms, start_date: '2027-09-30', end_date: '2028-09-29', first_due_date: '2027-09-30' }), /already allocated/);
-  store.saveLease({ ...terms, start_date: '2027-10-01', end_date: '2028-09-30', first_due_date: '2027-10-01' });
-  assert.equal(store.state().leases.length, 2);
+  store.saveAgreement(terms);
+  assert.throws(
+    () => store.completeBuilding({ completed_date: "2027-04-28" }),
+    /after/,
+  );
+  assert.throws(
+    () => store.completeBuilding({ completed_date: "2026-10-27" }),
+    /agreement dates/,
+  );
+  assert.equal(store.state().settings.completed_date, "");
 });
-test('lease schedule clamps dates without drifting after February', t => {
+test("later tenants get their own start dates, anniversary and rent increases", (t) => {
+  const { store, spaces, terms, payment, setToday } = fixture(t);
+  store.completeBuilding({ completed_date: "2026-10-28" });
+  setToday("2027-01-15");
+  const a = store.saveAgreement({
+    ...terms,
+    agreed_on: "2027-01-15",
+    space_ids: [spaces[2]],
+    start_mode: "date",
+    start_date: "2027-02-01",
+    rules: [{ year: 3, type: "percent", value: "10", repeat: true }],
+  }).id;
+  payment(a, "6000");
+  const s = store.state();
+  assert.equal(s.agreements[0].effective_start, "2027-02-01");
+  assert.equal(s.charges.find((c) => c.year === 2).due_date, "2028-02-01");
+  assert.equal(s.charges.find((c) => c.year === 3).amount, 1320000);
+  assert.equal(s.charges.find((c) => c.year === 4).amount, 1452000);
+  assert.throws(
+    () => store.saveAgreement({ ...terms, agreed_on: "2027-01-15" }),
+    /individual start/,
+  );
+});
+test("later scheduled leases can use a space after the inclusive end of an existing lease", (t) => {
+  const { store, terms, payment } = fixture(t);
+  store.completeBuilding({ completed_date: "2026-10-28" });
+  const a = store.saveAgreement({ ...terms, years: 1 }).id;
+  payment(a, "6000");
+  const b = store.saveAgreement({
+    ...terms,
+    years: 1,
+    start_mode: "date",
+    start_date: "2027-10-28",
+  }).id;
+  payment(b, "6000");
+  assert.equal(store.state().agreements.filter((a) => a.secured).length, 2);
+  const c = store.saveAgreement({
+    ...terms,
+    years: 1,
+    start_mode: "date",
+    start_date: "2027-10-27",
+  }).id;
+  assert.throws(() => payment(c, "6000"), /secured/);
+});
+test("cancellation preserves receipts, releases spaces and records partial refunds against individual settlement", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id;
+  payment(a, "6000");
+  store.cancelAgreement(a, {
+    cancelled_on: "2026-10-28",
+    retained: "1000",
+    reason: "Agreed individual settlement",
+  });
+  let s = store.state();
+  assert.equal(s.agreements[0].refund_due, 500000);
+  assert.ok(
+    s.charges.every((c) => c.balance === 0 && c.status === "cancelled"),
+  );
+  assert.equal(s.payments.length, 1);
+  assert.throws(() => payment(a, "1"), /cancelled/);
+  payment(a, "2000", { kind: "refund", charge_id: undefined, id: "refund-1" });
+  payment(a, "2000", { kind: "refund", charge_id: undefined, id: "refund-1" });
+  assert.equal(store.state().agreements[0].refund_due, 300000);
+  assert.throws(
+    () => payment(a, "3000.01", { kind: "refund", charge_id: undefined }),
+    /refund/,
+  );
+  const b = store.saveAgreement(terms).id;
+  payment(b, "6000");
+  assert.equal(store.state().agreements.find((x) => x.id === b).secured, true);
+});
+test("financial terms cannot erase history; voided entry remains auditable and cannot be repeated", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id,
+    p = payment(a, "100").id;
+  assert.throws(
+    () => store.saveAgreement({ ...terms, annual_rent: "1" }, a),
+    /history/,
+  );
+  store.voidPayment(p, { reason: "Entered the wrong amount" });
+  assert.equal(store.state().payments.length, 1);
+  assert.equal(store.state().agreements[0].received, 0);
+  assert.match(store.state().payments[0].void_reason, /wrong/);
+  assert.throws(() => store.voidPayment(p, { reason: "Again" }), /already/);
+});
+test("active initial payments and settlement receipts cannot be voided", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement(terms).id,
+    p = payment(a, "6000").id;
+  store.completeBuilding({ completed_date: "2026-10-28" });
+  assert.throws(
+    () => store.voidPayment(p, { reason: "Correction" }),
+    /active lease/,
+  );
+  store.cancelAgreement(a, {
+    cancelled_on: "2026-10-28",
+    retained: "6000",
+    reason: "Cancelled",
+  });
+  assert.throws(
+    () => store.voidPayment(p, { reason: "Correction" }),
+    /settlement/,
+  );
+});
+test("unpaid agreements are editable, invalid changes roll back without destroying existing schedule", (t) => {
   const { store, terms } = fixture(t);
-  store.saveLease({ ...terms, start_date: '2027-01-31', end_date: '2027-04-30', first_due_date: '2027-01-31', deposit: 0 });
-  assert.deepEqual(store.state().charges.map(c => c.due_date), ['2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']);
-});
-test('partial payments update exact balances; duplicate requests do not double-count', t => {
-  const { store, terms } = fixture(t);
-  store.saveLease(terms);
-  const charge = store.state().charges.find(c => c.kind === 'rent');
-  store.recordPayment(payment(charge));
-  store.recordPayment(payment(charge));
-  let state = store.state();
-  assert.equal(state.payments.length, 1);
-  let updated = state.charges.find(c => c.id === charge.id);
-  assert.equal(updated.paid, 40020);
-  assert.equal(updated.balance, 80035);
-  assert.equal(updated.status, 'overdue');
-  assert.throws(() => store.recordPayment(payment(charge, { amount: '12' })), /identifier was already used/);
-  assert.throws(() => store.recordPayment(payment(charge, { id: 'too-much', amount: '800.36' })), /exceeds/);
-  store.recordPayment(payment(charge, { id: 'remaining', amount: '800.35' }));
-  updated = store.state().charges.find(c => c.id === charge.id);
-  assert.equal(updated.balance, 0);
-  assert.equal(updated.status, 'paid');
-  store.remove('payments', 'remaining');
-  assert.equal(store.state().charges.find(c => c.id === charge.id).balance, 80035);
-});
-test('rent due today is not overdue and future charges are upcoming or partially paid', t => {
-  const { store, terms } = fixture(t);
-  store.saveLease({ ...terms, start_date: '2026-10-27', first_due_date: '2026-10-27', deposit: 0 });
-  assert.equal(store.state().charges[0].status, 'upcoming');
-  store.recordPayment(payment(store.state().charges[0]));
-  assert.equal(store.state().charges[0].status, 'partial');
-  assert.throws(() => store.recordPayment(payment(store.state().charges[0], { id: 'future', paid_date: '2026-10-28' })), /already|received/);
-});
-test('paid financial terms and rental history are protected from editing or deletion', t => {
-  const { store, terms, space, renter } = fixture(t);
-  const lease = store.saveLease(terms);
-  store.recordPayment(payment(store.state().charges.find(c => c.kind === 'rent')));
-  assert.throws(() => store.saveLease({ ...terms, monthly_rent: '1' }, lease.id), /has payments/);
-  assert.throws(() => store.remove('leases', lease.id), /recorded payments/);
-  assert.throws(() => store.remove('spaces', space.id), /lease history/);
-  assert.throws(() => store.remove('renters', renter.id), /lease history/);
-});
-test('editing an unpaid lease replaces its schedule without orphaned charges', t => {
-  const { store, terms } = fixture(t);
-  const lease = store.saveLease(terms);
-  store.saveLease({ ...terms, monthly_rent: '1500', deposit: '0', end_date: '2026-12-31' }, lease.id);
+  const a = store.saveAgreement(terms).id;
+  store.saveAgreement({ ...terms, annual_rent: "14000", years: 2 }, a);
   assert.equal(store.state().charges.length, 3);
-  assert.ok(store.state().charges.every(c => c.amount === 150000));
+  assert.equal(store.state().charges[0].amount, 700000);
+  assert.throws(() =>
+    store.saveAgreement({ ...terms, space_ids: ["missing"] }, a),
+  );
+  assert.equal(store.state().charges.length, 3);
 });
-test('ending a lease preserves deposits and earlier charges, and rejects removal of paid future rent', t => {
-  const { store, terms } = fixture(t);
-  const lease = store.saveLease(terms);
-  const future = store.state().charges.find(c => c.kind === 'rent' && c.due_date === '2027-01-01');
-  store.recordPayment(payment(future));
-  assert.throws(() => store.endLease(lease.id, { end_date: '2026-12-31' }), /payments against rent/);
-  store.remove('payments', 'payment-one');
-  store.endLease(lease.id, { end_date: '2026-12-31' });
-  const state = store.state();
-  assert.equal(state.charges.filter(c => c.kind === 'rent').length, 3);
-  assert.equal(state.charges.filter(c => c.kind === 'deposit').length, 1);
-  assert.equal(state.leases[0].end_date, '2026-12-31');
+test("odd-cent totals split without losing cents and later payments require full initial payment", (t) => {
+  const { store, terms, payment } = fixture(t);
+  const a = store.saveAgreement({
+    ...terms,
+    annual_rent: "10.01",
+    years: 1,
+  }).id;
+  const charges = store.state().charges;
+  assert.equal(charges.find((c) => c.kind === "initial").amount, 501);
+  assert.equal(charges.find((c) => c.kind === "completion").amount, 500);
+  assert.throws(
+    () =>
+      payment(a, "1", {
+        charge_id: charges.find((c) => c.kind === "completion").id,
+      }),
+    /initial half/,
+  );
+  assert.throws(
+    () => payment(a, "1", { paid_date: "2026-10-29" }),
+    /received or refunded/,
+  );
 });
-test('invalid dates, spaces, amounts, and time zones are rejected without changes', t => {
-  const { store, terms } = fixture(t);
-  assert.throws(() => store.saveLease({ ...terms, start_date: '2026-02-31' }), /valid/);
-  assert.throws(() => store.saveLease({ ...terms, first_due_date: '2026-09-01' }), /within/);
-  assert.throws(() => store.saveLease({ ...terms, end_date: '2040-01-01' }), /ten years/);
-  assert.throws(() => store.saveLease({ ...terms, monthly_rent: -1 }), /USD amount/);
-  assert.throws(() => store.saveSpace({ name: 'Shop g01', type: 'Shop', floor: 'Ground', area: 20, ready: true }), /already exists/);
-  assert.throws(() => store.saveSpace({ name: 'New', type: 'Shop', floor: 'Ground', area: -5, ready: true }), /Area/);
-  assert.throws(() => store.saveSettings({ name: 'Test', completion_date: '2027-04-27', time_zone: 'invalid/zone' }), /time zone/);
-  assert.equal(store.state().leases.length, 0);
-  assert.equal(store.state().charges.length, 0);
+test("documents are validated, stored intact, metadata excludes bytes, and linked spaces are protected", (t) => {
+  const { store, terms, spaces } = fixture(t);
+  const a = store.saveAgreement(terms).id,
+    bytes = Buffer.from("%PDF-1.7\nTest contract");
+  const d = store.saveDocument(
+    a,
+    "Signed contract.pdf",
+    "application/pdf",
+    bytes,
+  ).id;
+  assert.deepEqual(Buffer.from(store.document(d).content), bytes);
+  assert.equal(store.state().documents[0].content, undefined);
+  assert.throws(
+    () =>
+      store.saveDocument(
+        a,
+        "attack.html",
+        "text/html",
+        Buffer.from("<script>"),
+      ),
+    /PDF/,
+  );
+  assert.throws(
+    () => store.saveDocument(a, "../test.pdf", "application/pdf", bytes),
+    /file name/,
+  );
+  assert.throws(
+    () =>
+      store.saveDocument(a, "fake.pdf", "application/pdf", Buffer.from("fake")),
+    /matching/,
+  );
+  assert.throws(() => store.remove("spaces", spaces[0]), /history/);
+  store.remove("documents", d);
+  assert.equal(store.state().documents.length, 0);
 });
-test('SQLite persists records across server restarts', t => {
-  const directory = mkdtempSync(join(tmpdir(), 'our-building-store-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const filename = join(directory, 'building.sqlite');
-  const first = createStore(filename, () => '2026-10-27');
-  const space = first.saveSpace({ name: 'Roof east', type: 'Rooftop', floor: 'Roof', area: 150, ready: true });
+test("agreements, receipts and attachments survive reopening SQLite", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "building-v2-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "db.sqlite");
+  const first = createStore(path, () => "2026-10-28");
+  const space = first.saveSpace({
+    name: "G01",
+    type: "Shop",
+    floor: "G",
+    area: 80,
+  }).id;
+  const p = first.savePerson({ name: "Tenant", phone: "123" }).id;
+  const a = first.saveAgreement({
+    person_id: p,
+    space_ids: [space],
+    agreed_on: "2026-10-28",
+    start_mode: "completion",
+    years: 1,
+    annual_rent: "1000",
+  }).id;
+  const doc = first.saveDocument(
+    a,
+    "Lease.pdf",
+    "application/pdf",
+    Buffer.from("%PDF-1.4"),
+  ).id;
   first.close();
-  const second = createStore(filename, () => '2026-10-27');
-  assert.equal(second.state().spaces[0].id, space.id);
-  assert.equal(second.state().spaces[0].type, 'Rooftop');
+  const second = createStore(path);
+  assert.equal(second.state().agreements[0].id, a);
+  assert.equal(second.document(doc).name, "Lease.pdf");
   second.close();
+});
+test("old monthly records stay readable and cannot be silently double allocated", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "building-legacy-"));
+  const path = join(dir, "db.sqlite");
+  const { store, terms, spaces, payment } = fixture(t, path);
+  const db = new DatabaseSync(path);
+  db.exec(
+    "CREATE TABLE leases(id TEXT,space_id TEXT,start_date TEXT,end_date TEXT);CREATE TABLE charges(id TEXT);CREATE TABLE payments(id TEXT)",
+  );
+  db.prepare("INSERT INTO leases VALUES(?,?,?,?)").run(
+    "old",
+    spaces[0],
+    "2026-01-01",
+    "2028-01-01",
+  );
+  db.close();
+  store.close();
+  const fresh = createStore(path, () => "2026-10-28");
+  assert.equal(fresh.state().legacy_count, 1);
+  assert.equal(fresh.legacy().leases[0].id, "old");
+  const a = fresh.saveAgreement(terms).id;
+  const c = fresh
+    .state()
+    .charges.find((c) => c.agreement_id === a && c.kind === "initial");
+  assert.throws(
+    () =>
+      fresh.recordPayment({
+        id: "p",
+        agreement_id: a,
+        charge_id: c.id,
+        kind: "receipt",
+        amount: "6000",
+        paid_date: "2026-10-28",
+        method: "Cash",
+      }),
+    /earlier monthly/,
+  );
+  fresh.close();
+  rmSync(dir, { recursive: true, force: true });
 });

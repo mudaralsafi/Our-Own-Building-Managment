@@ -10,7 +10,7 @@ The website now includes owner registration, password sign-in, private server se
 2. Authorize Render to access `mudaralsafi/Our-Own-Building-Managment` when prompted. Review the web service, persistent disk, and displayed cost, then deploy the Blueprint. If the deployment link does not select the repository, use **New → Blueprint** in the Render dashboard and select this repository's `main` branch.
 3. Render builds the frontend, runs the Node server, supplies an HTTPS service address, and generates `SETUP_TOKEN` in its private environment settings. This app uses `RENDER_EXTERNAL_URL` automatically, so no custom domain is required.
 4. Open the HTTPS website. Copy the private setup code from the hosting dashboard into the first-owner form, then choose your own email and password. Never paste passwords or setup codes into chat or source files. Registration closes permanently after the first account is created.
-5. Add a space, renter, and lease, record a payment, and restart the service. Sign back in and confirm those records remain. Verify a daily backup appears on the persistent disk. These live checks have not been run yet.
+5. With disposable deployment-test data, verify a space, call, combined-space agreement, partial payment, and private PDF upload, then restart the service. Do not confirm actual completion or insert fake payments in the real owner workspace. Sign back in and confirm those records remain. Verify a daily backup appears on the persistent disk. These live checks have not been run yet.
 
 If you add a custom domain, configure DNS and HTTPS with the hosting provider, then set `PUBLIC_URL` to the exact HTTPS origin (for example, `https://building.example.com`). All browser traffic must use this one origin; redirect other aliases to it. Do not set an origin containing a path or a trailing query.
 
@@ -18,16 +18,16 @@ If you add a custom domain, configure DNS and HTTPS with the hosting provider, t
 
 Use Node.js 24 or later. Build with `npm ci --include=dev && npm run build`, then start with `npm start`. Set:
 
-| Variable | Purpose |
-| --- | --- |
-| `NODE_ENV=production` | Enables production validation, secure cookies, and daily database backups. |
-| `PUBLIC_URL` | Exact public HTTPS origin. Render can supply `RENDER_EXTERNAL_URL` instead. |
-| `HOST=0.0.0.0` | Listen on the network interface behind the HTTPS reverse proxy. |
-| `PORT` | The port your host routes to the Node server. Defaults to 3000. |
-| `DATA_PATH` | Absolute path to `building.sqlite` on a persistent, private disk. |
-| `SETUP_TOKEN` | A random secret of at least 32 characters, required before first-owner registration. |
-| `AUTH_DATA_PATH` | Optional; defaults to `auth.sqlite` next to the building database. Keep it persistent too. |
-| `BACKUP_PATH` | Optional; defaults to a private `backups` folder alongside the databases. |
+| Variable              | Purpose                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `NODE_ENV=production` | Enables production validation, secure cookies, and daily database backups.                 |
+| `PUBLIC_URL`          | Exact public HTTPS origin. Render can supply `RENDER_EXTERNAL_URL` instead.                |
+| `HOST=0.0.0.0`        | Listen on the network interface behind the HTTPS reverse proxy.                            |
+| `PORT`                | The port your host routes to the Node server. Defaults to 3000.                            |
+| `DATA_PATH`           | Absolute path to `building.sqlite` on a persistent, private disk.                          |
+| `SETUP_TOKEN`         | A random secret of at least 32 characters, required before first-owner registration.       |
+| `AUTH_DATA_PATH`      | Optional; defaults to `auth.sqlite` next to the building database. Keep it persistent too. |
+| `BACKUP_PATH`         | Optional; defaults to a private `backups` folder alongside the databases.                  |
 
 The HTTPS proxy must preserve the public Host header. Only expose the proxy to the internet, not the Node HTTP port. `/api/health` is intentionally public for hosting health checks; all building records and mutations require an authenticated owner session.
 
@@ -45,10 +45,16 @@ If the owner loses access, run `npm run owner:reset` in an authenticated, intera
 
 Production creates a consistent SQLite backup one minute after startup and once every 24 hours, keeping the latest 14 copies. Each timestamped folder contains `building.sqlite` and `auth.sqlite`. You can also run `npm run backup` while the app is running.
 
-These are local disk backups, not disaster recovery: regularly copy them to private storage outside the hosting service. Backups include renter details and authentication data. Logs report backup success or failure; monitor failures. The JSON export in Settings remains a portable record export, not an automated restore.
+These are local disk backups, not disaster recovery: regularly copy them to private storage outside the hosting service. Backups include tenant details, document bytes, and authentication data. Monitor persistent disk space as uploads and retained snapshots grow. Logs report backup success or failure; monitor failures. The JSON export in Settings remains a portable record export, not an automated restore.
 
 To restore, stop the service, preserve the existing complete data directory, and replace the two database files with a matched backup. Do not leave WAL/SHM companion files from a different database next to restored files. Start the service, use `npm run owner:reset` to invalidate restored sessions, then verify records and a payment balance. Never delete the current data until the backup has been verified.
 
 ## Validation completed locally
 
 Run `npm run build`, then `npm test` and `npm run test:browser`. The HTTP integration check uses the built frontend. Authentication tests exercise setup protection, login/logout, expiry, throttling, password changes, stored hashes, restart persistence, and restorable SQLite backups. Browser checks use disposable records and accounts. Live HTTPS, provider provisioning, custom-domain DNS, and production disk persistence require a real hosting account and must be verified after deployment.
+
+## Rebuilt annual-rent workflow
+
+Before updating an existing installation, take a verified backup. This version retains the owner account, inventory, contacts, and any earlier monthly-rent tables. It creates new agreement and annual-rent tables without guessing how to convert earlier terms. If earlier leases exist, a banner and authenticated export make them available for review, and overlapping allocation is blocked. Do not delete financial history to remove this protection.
+
+Documents live in the building database on the same persistent disk. No public upload folder or separate storage credential is needed. Uploaded copies require owner authentication to download. Verify that an anonymous request cannot fetch a known document URL and that a backup restores the document contents.
